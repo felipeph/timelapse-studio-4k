@@ -5,20 +5,21 @@
 TIMELAPSE STUDIO 4K UHD
 -----------------------
 Automação completa para processamento de fotos de qualquer câmera (GoPro, Canon SX50, Nikon, Sony, etc.)
-em subpastas de DCIM ou no diretório de trabalho.
+em subpastas de DCIM ou no diretório de trabalho/pasta personalizada.
 
 Etapa 1: Recorte centralizado 16:9 (se necessário) e redimensionamento para 4K UHD (3840x2160)
          usando PIL com multiprocessamento de todos os núcleos da CPU.
 Etapa 2: Renderização de vídeo H.264/HEVC ultra-rápida com detecção automática
          de aceleração por GPU (NVIDIA NVENC / AMD AMF / Intel QSV) ou CPU com fallback automático.
 
-Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS.
+Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS e Pasta de Origem.
 """
 
 import os
 import sys
 import glob
 import time
+import argparse
 import datetime
 import subprocess
 import concurrent.futures
@@ -26,6 +27,7 @@ from PIL import Image, ExifTags
 
 # Configurações Padrão
 DEFAULT_CONFIG = {
+    "source_dir": ".",
     "target_width": 3840,
     "target_height": 2160,
     "fps": 60,
@@ -44,6 +46,14 @@ CROP_MODE_LABELS = {
     "top": "Por Cima (Preserva topo, apaga base)"
 }
 
+def sanitize_path(path_str):
+    """Sanitiza caminhos informados pelo usuário, removendo aspas e expandindo ~."""
+    if not path_str:
+        return ""
+    cleaned = path_str.strip().strip("'\"")
+    cleaned = os.path.expanduser(cleaned)
+    return os.path.normpath(cleaned)
+
 def print_banner(config=None):
     """Exibe o cabeçalho decorado do programa e as configurações atuais ativas."""
     print("=" * 66)
@@ -53,12 +63,18 @@ def print_banner(config=None):
     if config:
         crop_mode = config.get("crop_mode", "center")
         crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode)
+        source_dir = config.get("source_dir", ".")
+        source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
+        if source_dir == ".":
+            source_display += " (Diretório Atual)"
+            
         print(" CONFIGURAÇÕES ATUAIS:")
-        print(f"   • Taxa de Quadros (FPS) : {config['fps']} fps")
-        print(f"   • Modo de Corte (Crop)   : {crop_label}")
-        print(f"   • Qualidade (CRF)        : {config['crf']} (Menor = melhor qualidade)")
-        print(f"   • Resolução Alvo         : {config['target_width']}x{config['target_height']} (4K UHD)")
-        print(f"   • Amostra Modo Teste     : {config['test_sample_size']} fotos")
+        print(f"   • Pasta de Origem (Fotos): {source_display}")
+        print(f"   • Taxa de Quadros (FPS)  : {config['fps']} fps")
+        print(f"   • Modo de Corte (Crop)    : {crop_label}")
+        print(f"   • Qualidade (CRF)         : {config['crf']} (Menor = melhor qualidade)")
+        print(f"   • Resolução Alvo          : {config['target_width']}x{config['target_height']} (4K UHD)")
+        print(f"   • Amostra Modo Teste      : {config['test_sample_size']} fotos")
         print("=" * 66)
 
 def print_progress_bar(current, total, start_time, prefix="Progresso"):
@@ -112,12 +128,15 @@ def get_exif_timestamp(img_path):
 
 def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
     """
-    Busca todas as fotos JPG/JPEG recursivamente em DCIM (ex: 138GOPRO, 100CANON)
-    ou em subpastas no diretório atual, ignorando a pasta de saída de cortes.
+    Busca todas as fotos JPG/JPEG recursivamente na pasta informada (ex: subpastas DCIM, 138GOPRO, 100CANON, ou raiz),
+    ignorando a pasta de saída de cortes.
     """
     image_files = []
-    output_dir_abs = os.path.abspath(os.path.join(base_dir, output_dir_name))
-    
+    if not base_dir or not os.path.exists(base_dir):
+        return []
+
+    output_dir_abs = os.path.abspath(output_dir_name)
+    output_in_base_abs = os.path.abspath(os.path.join(base_dir, output_dir_name))
     valid_exts = {".jpg", ".jpeg"}
     
     # Varredura recursiva por todas as subpastas
@@ -125,6 +144,8 @@ def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
         # Ignorar pasta de saída cortada, caches e pastas ocultas
         abs_root = os.path.abspath(root)
         if abs_root == output_dir_abs or abs_root.startswith(output_dir_abs + os.sep):
+            continue
+        if abs_root == output_in_base_abs or abs_root.startswith(output_in_base_abs + os.sep):
             continue
         if "__pycache__" in root or ".git" in root:
             continue
@@ -138,6 +159,49 @@ def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
 
 # Alias para compatibilidade
 find_all_gopro_photos = find_all_photos
+
+def select_source_dir(config):
+    """Menu interativo para definir ou alterar a pasta de origem das fotos."""
+    current_source = config.get("source_dir", ".")
+    current_abs = os.path.abspath(current_source)
+    print("\n" + "=" * 66)
+    print("            SELEÇÃO DA PASTA DE ORIGEM DAS FOTOS")
+    print("=" * 66)
+    print(f"Pasta de origem atual: {current_abs}")
+    print("\nOpções:")
+    print("  [1] Usar diretório de trabalho atual (.)")
+    print("  [2] Digitar ou arrastar e soltar (drag & drop) o caminho da pasta...")
+    print("  [0] Cancelar / Manter pasta atual")
+    print("-" * 66)
+    
+    choice = input("Escolha uma opção [0-2]: ").strip()
+    if choice == "1":
+        config["source_dir"] = "."
+        photos = find_all_photos(config["source_dir"], config["output_dir"])
+        print(f"[+] Pasta de origem redefinida para o diretório atual.")
+        print(f"[+] Fotos JPG/JPEG encontradas: {len(photos)}")
+    elif choice == "2":
+        path_input = input("\nDigite ou arraste a pasta aqui: ").strip()
+        cleaned_path = sanitize_path(path_input)
+        if not cleaned_path:
+            print("[-] Nenhum caminho informado. Mantendo pasta anterior.")
+            return
+        
+        if not os.path.exists(cleaned_path):
+            print(f"[-] Erro: O caminho '{cleaned_path}' não foi encontrado.")
+            return
+        if not os.path.isdir(cleaned_path):
+            print(f"[-] Erro: O caminho informado não é uma pasta/diretório válido.")
+            return
+            
+        config["source_dir"] = cleaned_path
+        photos = find_all_photos(config["source_dir"], config["output_dir"])
+        print(f"[+] Pasta de origem alterada com sucesso para: {os.path.abspath(cleaned_path)}")
+        print(f"[+] Total de fotos JPG/JPEG encontradas: {len(photos)}")
+    elif choice == "0":
+        print("[+] Pasta de origem mantida.")
+    else:
+        print("[-] Opção inválida. Pasta de origem mantida.")
 
 def process_single_image(task):
     """
@@ -208,18 +272,22 @@ def process_single_image(task):
 
 def run_step_1_crop(config, max_photos=None):
     """Etapa 1: Cortar e redimensionar fotos em paralelo via PIL."""
-    current_dir = os.getcwd()
-    all_photos = find_all_photos(current_dir, config["output_dir"])
+    source_dir = config.get("source_dir", ".")
+    all_photos = find_all_photos(source_dir, config["output_dir"])
     
     if not all_photos:
-        print("\n[-] Erro: Nenhuma foto JPG/JPEG encontrada em subpastas de DCIM ou no diretório atual.")
+        print(f"\n[-] Erro: Nenhuma foto JPG/JPEG encontrada na pasta de origem: {os.path.abspath(source_dir)}")
+        prompt = input("Deseja informar outra pasta de fotos agora? (s/N): ").strip().lower()
+        if prompt == 's':
+            select_source_dir(config)
+            return run_step_1_crop(config, max_photos=max_photos)
         return False, []
 
     if max_photos:
         all_photos = all_photos[:max_photos]
         print(f"\n[!] MODO TESTE: Limitando processamento às primeiras {len(all_photos)} fotos.")
 
-    output_dir = os.path.join(current_dir, config["output_dir"])
+    output_dir = os.path.abspath(config["output_dir"])
     os.makedirs(output_dir, exist_ok=True)
     
     crop_mode = config.get("crop_mode", "center")
@@ -229,11 +297,12 @@ def run_step_1_crop(config, max_photos=None):
     print("\n" + "="*66)
     print("        ETAPA 1: CORTE 16:9 E REDIMENSIONAMENTO 4K (PIL)")
     print("="*66)
+    print(f"[+] Pasta de origem: {os.path.abspath(source_dir)}")
     print(f"[+] Fotos localizadas: {total}")
     print(f"[+] Modo de corte: {crop_label}")
     print(f"[+] Resolução de saída: {config['target_width']}x{config['target_height']} (4K UHD)")
     print(f"[+] Núcleos de CPU (Workers): {os.cpu_count()}")
-    print(f"[+] Pasta de destino: {config['output_dir']}")
+    print(f"[+] Pasta de destino: {output_dir}")
     print("-" * 66)
 
     tasks = [
@@ -262,7 +331,7 @@ def run_step_1_crop(config, max_photos=None):
     else:
         print(f"[!] Concluído com {errors} erros de {completed} fotos processadas.")
         
-    print(f"[+] Fotos salvas em: {os.path.abspath(output_dir)}")
+    print(f"[+] Fotos salvas em: {output_dir}")
     print("=" * 66)
     return True, output_dir
 
@@ -385,8 +454,7 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False):
 
 def run_step_2_video(config, is_test=False):
     """Etapa 2: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU se a GPU falhar."""
-    current_dir = os.getcwd()
-    input_dir = os.path.join(current_dir, config["output_dir"])
+    input_dir = os.path.abspath(config["output_dir"])
     
     if not os.path.exists(input_dir):
         print(f"\n[-] Erro: A pasta '{config['output_dir']}' não foi encontrada.")
@@ -401,7 +469,7 @@ def run_step_2_video(config, is_test=False):
         return False
 
     out_file = config["test_output_video"] if is_test else config["output_video"]
-    output_path = os.path.join(current_dir, out_file)
+    output_path = os.path.abspath(out_file)
 
     # Primeira tentativa (utiliza GPU se disponível)
     success, encoder_used = render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False)
@@ -486,8 +554,9 @@ def run_test_mode(config):
     print(f"\n[!] INICIANDO MODO TESTE RÁPIDO ({config['test_sample_size']} FOTOS)")
     print(f"    FPS: {config['fps']} fps | Modo de corte: {crop_short}")
     
-    change_prompt = input("Deseja alterar FPS ou Modo de Corte antes do teste? (s/N): ").strip().lower()
+    change_prompt = input("Deseja alterar FPS, Pasta de Origem ou Modo de Corte antes do teste? (s/N): ").strip().lower()
     if change_prompt == 's':
+        select_source_dir(config)
         quick_change_fps(config)
         quick_change_crop(config)
         
@@ -507,8 +576,7 @@ def run_full_pipeline(config):
 
 def clean_manager(config):
     """Menu utilitário para limpeza de fotos cortadas e arquivos temporários."""
-    current_dir = os.getcwd()
-    output_dir = os.path.join(current_dir, config["output_dir"])
+    output_dir = os.path.abspath(config["output_dir"])
     
     while True:
         print("\n" + "="*66)
@@ -544,47 +612,129 @@ def edit_settings(config):
     """Menu para alteração interativa de parâmetros de configuração."""
     while True:
         crop_label = CROP_MODE_LABELS.get(config.get("crop_mode", "center"), config.get("crop_mode", "center"))
+        source_dir = config.get("source_dir", ".")
+        source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
+        if source_dir == ".":
+            source_display += " (Diretório Atual)"
+            
         print("\n" + "="*66)
         print("               CONFIGURAÇÕES DO TIMELAPSE STUDIO")
         print("="*66)
-        print(f"[1] Taxa de Quadros (FPS): {config['fps']} fps")
-        print(f"[2] Modo de Corte / Enquadramento (Crop 16:9): {crop_label}")
-        print(f"[3] Qualidade FFmpeg (CRF - menor = melhor): {config['crf']}")
-        print(f"[4] Resolução de saída: {config['target_width']}x{config['target_height']}")
-        print(f"[5] Amostragem do Modo Teste: {config['test_sample_size']} fotos")
-        print(f"[6] Preset FFmpeg (ultrafast, medium, slow): {config['preset']}")
+        print(f"[1] Pasta de Origem (Fotos): {source_display}")
+        print(f"[2] Taxa de Quadros (FPS)  : {config['fps']} fps")
+        print(f"[3] Modo de Corte (Crop)    : {crop_label}")
+        print(f"[4] Qualidade FFmpeg (CRF)  : {config['crf']}")
+        print(f"[5] Resolução de saída      : {config['target_width']}x{config['target_height']}")
+        print(f"[6] Amostragem Modo Teste   : {config['test_sample_size']} fotos")
+        print(f"[7] Preset FFmpeg           : {config['preset']}")
         print("[0] Salvar e Voltar ao Menu Principal")
         print("-" * 66)
         
         choice = input("Escolha uma opção para alterar (ou 0 para sair): ").strip()
         if choice == "1":
-            quick_change_fps(config)
+            select_source_dir(config)
         elif choice == "2":
-            quick_change_crop(config)
+            quick_change_fps(config)
         elif choice == "3":
+            quick_change_crop(config)
+        elif choice == "4":
             val = input(f"Novo CRF [{config['crf']}]: ").strip()
             if val.isdigit():
                 config["crf"] = int(val)
-        elif choice == "4":
+        elif choice == "5":
             w = input(f"Largura [{config['target_width']}]: ").strip()
             h = input(f"Altura [{config['target_height']}]: ").strip()
             if w.isdigit() and h.isdigit():
                 config["target_width"] = int(w)
                 config["target_height"] = int(h)
-        elif choice == "5":
+        elif choice == "6":
             val = input(f"Nº de Fotos no Teste [{config['test_sample_size']}]: ").strip()
             if val.isdigit():
                 config["test_sample_size"] = int(val)
-        elif choice == "6":
+        elif choice == "7":
             val = input(f"Novo Preset (ultrafast/medium/slow) [{config['preset']}]: ").strip()
             if val in ["ultrafast", "medium", "slow"]:
                 config["preset"] = val
         elif choice == "0":
             break
 
+def parse_arguments():
+    """Configura e processa os argumentos de linha de comando."""
+    parser = argparse.ArgumentParser(
+        description="Timelapse Studio 4K UHD - Processamento e Renderização de Timelapses Multicâmeras."
+    )
+    parser.add_argument(
+        "-i", "--input", "--source",
+        dest="source_dir",
+        type=str,
+        default=None,
+        help="Caminho da pasta de origem onde estão as fotos JPG/JPEG (suporta caminhos com aspas e drag & drop)."
+    )
+    parser.add_argument(
+        "-fps", "--fps",
+        dest="fps",
+        type=int,
+        default=None,
+        help="Taxa de quadros por segundo (ex: 15, 24, 30, 60)."
+    )
+    parser.add_argument(
+        "--crop",
+        dest="crop_mode",
+        choices=["center", "top", "bottom"],
+        default=None,
+        help="Modo de enquadramento/corte vertical (center, top, bottom)."
+    )
+    parser.add_argument(
+        "--crf",
+        dest="crf",
+        type=int,
+        default=None,
+        help="Fator de qualidade de compressão CRF (menor = melhor qualidade, ex: 15)."
+    )
+    parser.add_argument(
+        "--run-all",
+        action="store_true",
+        help="Executa o pipeline completo (Etapa 1 + Etapa 2) e encerra sem abrir o menu interativo."
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Executa o modo de teste rápido com amostragem reduzida e encerra."
+    )
+    return parser.parse_args()
+
 def main():
+    args = parse_arguments()
     config = DEFAULT_CONFIG.copy()
     
+    if args.source_dir:
+        cleaned_source = sanitize_path(args.source_dir)
+        if os.path.exists(cleaned_source) and os.path.isdir(cleaned_source):
+            config["source_dir"] = cleaned_source
+        else:
+            print(f"[!] Aviso: A pasta de origem informada '{args.source_dir}' não foi encontrada. Usando padrão.")
+            
+    if args.fps:
+        config["fps"] = args.fps
+    if args.crop_mode:
+        config["crop_mode"] = args.crop_mode
+    if args.crf is not None:
+        config["crf"] = args.crf
+
+    # Execuções automáticas diretas via CLI
+    if args.run_all:
+        print_banner(config)
+        run_full_pipeline(config)
+        return
+        
+    if args.test:
+        print_banner(config)
+        success, _ = run_step_1_crop(config, max_photos=config["test_sample_size"])
+        if success:
+            run_step_2_video(config, is_test=True)
+        return
+
+    # Modo interativo CLI
     while True:
         crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
         print_banner(config)
@@ -593,6 +743,7 @@ def main():
         print("  [2] Etapa 2: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
         print("  [3] Modo Teste Rápido (Amostra de 120 fotos)")
         print("  [4] Executar Fluxo Completo (Etapa 1 + Etapa 2 Sequencialmente)")
+        print("  [O] Definir/Alterar Pasta de Origem (Fotos)")
         print(f"  [C] Alterar Modo de Corte (Atual: {crop_short})")
         print(f"  [F] Alterar FPS Rapidamente (FPS Atual: {config['fps']} fps)")
         print("  [5] Menu de Configurações Avançadas (CRF, Resolução, Presets, etc.)")
@@ -600,7 +751,7 @@ def main():
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-6, C ou F]: ").strip().lower()
+        choice = input("Selecione uma opção [0-6, O, C ou F]: ").strip().lower()
         
         if choice == "1":
             run_step_1_crop(config)
@@ -613,6 +764,9 @@ def main():
             input("\nPressione Enter para continuar...")
         elif choice == "4":
             run_full_pipeline(config)
+            input("\nPressione Enter para continuar...")
+        elif choice in ["o", "d"]:
+            select_source_dir(config)
             input("\nPressione Enter para continuar...")
         elif choice == "c":
             quick_change_crop(config)
@@ -628,7 +782,7 @@ def main():
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Digite um número de 0 a 6, C ou F.")
+            print("\n[-] Opção inválida. Digite um número de 0 a 6, O, C ou F.")
             time.sleep(1)
 
 if __name__ == "__main__":
