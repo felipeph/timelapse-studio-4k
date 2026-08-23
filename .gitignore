@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +217,38 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+=======
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+env/
+venv/
+ENV/
+
+# Arquivos de mídia e diretórios de processamento pesado
+DCIM/
+fotos_cortadas_4k/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.JPG
+*.jpg
+*.JPEG
+*.jpeg
+*.png
+*.PNG
+*.raw
+*.CR2
+*.NEF
+*.ARW
+
+# IDEs e Sistema Operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+>>>>>>> 32de87e (feat: Initial commit - Timelapse Studio 4K UHD)
