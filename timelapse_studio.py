@@ -8,11 +8,11 @@ Automação completa para processamento de fotos de qualquer câmera (GoPro, Can
 em subpastas de DCIM ou no diretório de trabalho/pasta personalizada.
 
 Etapa 1: Recorte centralizado 16:9 (se necessário) e redimensionamento para 4K UHD (3840x2160)
-         usando PIL com multiprocessamento de todos os núcleos da CPU.
-Etapa 2: Renderização de vídeo H.264/HEVC ultra-rápida com detecção automática
-         de aceleração por GPU (NVIDIA NVENC / AMD AMF / Intel QSV) ou CPU com fallback automático.
+         usando PIL com multiprocessamento, preservando metadados EXIF e nome com sufixo.
+Etapa 2: Renderização de vídeo H.264/HEVC ultra-rápida com detecção automática de GPU/CPU,
+         nomenclatura cronológica dinâmica (YYYY-MM-DD_HH-MM---HH-MM) e injeção de metadados.
 
-Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS e Pasta de Origem.
+Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS, Pasta de Origem e Nomenclatura.
 """
 
 import os
@@ -104,8 +104,8 @@ def print_progress_bar(current, total, start_time, prefix="Progresso"):
     )
     sys.stdout.flush()
 
-def get_exif_timestamp(img_path):
-    """Extrai a data/hora original da foto via cabeçalhos EXIF (suporta GoPro, Canon, etc.)."""
+def get_exif_datetime(img_path):
+    """Extrai a data/hora original da foto via cabeçalhos EXIF como objeto datetime."""
     try:
         with Image.open(img_path) as img:
             exif = img._getexif()
@@ -114,8 +114,7 @@ def get_exif_timestamp(img_path):
                 dt_str = exif.get(36867) or exif.get(306) or exif.get(36868)
                 if dt_str and isinstance(dt_str, str):
                     try:
-                        dt = datetime.datetime.strptime(dt_str[:19], '%Y:%m:%d %H:%M:%S')
-                        return dt.strftime('%Y%m%d_%H%M%S')
+                        return datetime.datetime.strptime(dt_str[:19], '%Y:%m:%d %H:%M:%S')
                     except ValueError:
                         pass
     except Exception:
@@ -123,8 +122,29 @@ def get_exif_timestamp(img_path):
     
     # Fallback para timestamp de modificação do arquivo no SO
     mtime = os.path.getmtime(img_path)
-    dt = datetime.datetime.fromtimestamp(mtime)
-    return dt.strftime('%Y%m%d_%H%M%S')
+    return datetime.datetime.fromtimestamp(mtime)
+
+def get_exif_timestamp(img_path):
+    """Extrai a data/hora original da foto via cabeçalhos EXIF (suporta GoPro, Canon, etc.)."""
+    dt = get_exif_datetime(img_path)
+    return dt.strftime('%Y-%m-%d_%H-%M-%S')
+
+def format_photo_name(img_path, dt=None):
+    """
+    Gera o nome da foto no formato: %Y-%m-%d_%H-%M-%S_<nome_original>.jpg
+    Se o arquivo já possuir o prefixo no padrão esperado, mantém para evitar duplicações.
+    """
+    if dt is None:
+        dt = get_exif_datetime(img_path)
+    ts_prefix = dt.strftime('%Y-%m-%d_%H-%M-%S')
+    base_name = os.path.basename(img_path)
+    name_no_ext, ext = os.path.splitext(base_name)
+    
+    # Verifica se já começa com o padrão YYYY-MM-DD_HH-MM-SS_
+    if len(name_no_ext) >= 20 and name_no_ext[4] == '-' and name_no_ext[7] == '-' and name_no_ext[10] == '_' and name_no_ext[13] == '-' and name_no_ext[16] == '-':
+        return f"{name_no_ext}{ext.lower()}"
+        
+    return f"{ts_prefix}_{name_no_ext}{ext.lower()}"
 
 def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
     """
@@ -203,23 +223,68 @@ def select_source_dir(config):
     else:
         print("[-] Opção inválida. Pasta de origem mantida.")
 
+def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_interactive=False):
+    """
+    Renomeia todas as fotos JPG/JPEG na pasta de origem com a data/hora do EXIF:
+    %Y-%m-%d_%H-%M-%S_<nome_original>.jpg
+    """
+    photos = find_all_photos(source_dir, output_dir_name)
+    if not photos:
+        print(f"\n[-] Nenhuma foto encontrada em {os.path.abspath(source_dir)} para renomear.")
+        return 0
+        
+    print("\n" + "=" * 66)
+    print("      ORGANIZAÇÃO E RENOMEAÇÃO DE FOTOS POR EXIF")
+    print("=" * 66)
+    print(f"[+] Pasta de origem: {os.path.abspath(source_dir)}")
+    print(f"[+] Total de fotos encontradas: {len(photos)}")
+    print("[+] Formato alvo: %Y-%m-%d_%H-%M-%S_<nome_original>.jpg")
+    print("-" * 66)
+    
+    if not non_interactive:
+        confirm = input("Deseja prosseguir com a renomeação dos arquivos de origem? (s/N): ").strip().lower()
+        if confirm != 's':
+            print("[+] Operação cancelada pelo usuário.")
+            return 0
+            
+    renamed_count = 0
+    for img_path in photos:
+        dir_name = os.path.dirname(img_path)
+        old_filename = os.path.basename(img_path)
+        new_filename = format_photo_name(img_path)
+        
+        if old_filename != new_filename:
+            new_path = os.path.join(dir_name, new_filename)
+            if not os.path.exists(new_path):
+                try:
+                    os.rename(img_path, new_path)
+                    renamed_count += 1
+                except Exception as e:
+                    print(f"[-] Erro ao renomear {old_filename}: {e}")
+                    
+    print(f"[+] Concluído! {renamed_count} arquivos renomeados com sucesso.")
+    print("=" * 66)
+    return renamed_count
+
 def process_single_image(task):
     """
     Worker executado em paralelo para cortar 16:9 (centralizado, por baixo ou por cima)
-    e redimensionar/ajustar para a resolução alvo (ex: 3840x2160 4K).
+    e redimensionar/ajustar para a resolução alvo (ex: 3840x2160 4K),
+    preservando os metadados EXIF e o nome base com o sufixo _crop4k.jpg.
     task = (img_path, output_dir, target_w, target_h, seq_idx, crop_mode)
     """
     img_path, output_dir, target_w, target_h, seq_idx, crop_mode = task
     try:
-        ts_str = get_exif_timestamp(img_path)
-        orig_name = os.path.splitext(os.path.basename(img_path))[0]
-        folder_prefix = os.path.basename(os.path.dirname(img_path))
+        dt = get_exif_datetime(img_path)
+        formatted_name = format_photo_name(img_path, dt=dt)
+        name_no_ext, _ = os.path.splitext(formatted_name)
         
-        # Nome do arquivo final: data_hora_pasta_sequencia_nomeoriginal.jpg
-        out_filename = f"{ts_str}_{folder_prefix}_{seq_idx:06d}_{orig_name}.jpg"
+        # Nome do arquivo final: %Y-%m-%d_%H-%M-%S_nomeoriginal_crop4k.jpg
+        out_filename = f"{name_no_ext}_crop4k.jpg"
         out_path = os.path.join(output_dir, out_filename)
         
         with Image.open(img_path) as img:
+            raw_exif = img.info.get("exif")
             w, h = img.size
             target_aspect = target_w / target_h
             img_aspect = w / h
@@ -264,14 +329,18 @@ def process_single_image(task):
             if resized.mode != "RGB":
                 resized = resized.convert("RGB")
                 
-            resized.save(out_path, "JPEG", quality=95)
+            save_kwargs = {"quality": 95}
+            if raw_exif:
+                save_kwargs["exif"] = raw_exif
+                
+            resized.save(out_path, "JPEG", **save_kwargs)
             
         return True, out_path
     except Exception as e:
         return False, f"Erro em {os.path.basename(img_path)}: {str(e)}"
 
 def run_step_1_crop(config, max_photos=None):
-    """Etapa 1: Cortar e redimensionar fotos em paralelo via PIL."""
+    """Etapa 1: Cortar e redimensionar fotos em paralelo via PIL preservando metadados EXIF."""
     source_dir = config.get("source_dir", ".")
     all_photos = find_all_photos(source_dir, config["output_dir"])
     
@@ -301,6 +370,7 @@ def run_step_1_crop(config, max_photos=None):
     print(f"[+] Fotos localizadas: {total}")
     print(f"[+] Modo de corte: {crop_label}")
     print(f"[+] Resolução de saída: {config['target_width']}x{config['target_height']} (4K UHD)")
+    print(f"[+] Preservação EXIF: Ativada")
     print(f"[+] Núcleos de CPU (Workers): {os.cpu_count()}")
     print(f"[+] Pasta de destino: {output_dir}")
     print("-" * 66)
@@ -364,13 +434,44 @@ def detect_ffmpeg_encoder(preset, crf, force_cpu=False):
     cpu_args = ["-c:v", "libx264", "-profile:v", "high", "-preset", preset, "-crf", str(crf)]
     return "libx264 (CPU)", cpu_args
 
-def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False):
-    """Executa a renderização do FFmpeg via pipe com cálculo seguro de GOP e B-frames."""
+def generate_video_info(cropped_photos, is_test=False):
+    """
+    Calcula o nome dinâmico do vídeo e os metadados de captura com base na primeira e na última foto.
+    Formato: timelapse_YYYY-MM-DD_HH-MM---HH-MM.mp4
+    """
+    if not cropped_photos:
+        default_name = "timelapse_teste_4k.mp4" if is_test else "timelapse_4k_cortado.mp4"
+        return default_name, datetime.datetime.now(), datetime.datetime.now(), ""
+        
+    first_dt = get_exif_datetime(cropped_photos[0])
+    last_dt = get_exif_datetime(cropped_photos[-1])
+    
+    first_date_str = first_dt.strftime('%Y-%m-%d')
+    last_date_str = last_dt.strftime('%Y-%m-%d')
+    first_time_str = first_dt.strftime('%H-%M')
+    last_time_str = last_dt.strftime('%H-%M')
+    
+    if first_date_str == last_date_str:
+        range_str = f"{first_date_str}_{first_time_str}---{last_time_str}"
+    else:
+        range_str = f"{first_date_str}_{first_time_str}---{last_date_str}_{last_time_str}"
+        
+    prefix = "timelapse_teste" if is_test else "timelapse"
+    video_filename = f"{prefix}_{range_str}.mp4"
+    
+    return video_filename, first_dt, last_dt, range_str
+
+def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, first_dt=None, last_dt=None, range_str=""):
+    """Executa a renderização do FFmpeg via pipe com cálculo seguro de GOP, B-frames e injeção de metadados."""
     total_photos = len(cropped_photos)
     fps = config["fps"]
     
+    if first_dt is None and cropped_photos:
+        first_dt = get_exif_datetime(cropped_photos[0])
+    if last_dt is None and cropped_photos:
+        last_dt = get_exif_datetime(cropped_photos[-1])
+        
     # Cálculo seguro da estrutura GOP e B-frames conforme o FPS
-    # Para FPS <= 2, desativar B-frames (bf=0) e ajustar GOP para evitar bugs no Intel QSV / NVENC
     if fps <= 2:
         gop_size = max(1, fps)
         b_frames = 0
@@ -380,11 +481,26 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False):
 
     encoder_name, encoder_args = detect_ffmpeg_encoder(config["preset"], config["crf"], force_cpu=force_cpu)
 
+    start_iso = first_dt.strftime('%Y-%m-%dT%H:%M:%S') if first_dt else datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    start_readable = first_dt.strftime('%Y-%m-%d %H:%M:%S') if first_dt else "Desconhecido"
+    end_readable = last_dt.strftime('%Y-%m-%d %H:%M:%S') if last_dt else "Desconhecido"
+    title_str = f"Timelapse {range_str}" if range_str else "Timelapse 4K UHD"
+
+    metadata_args = [
+        "-metadata", f"creation_time={start_iso}",
+        "-metadata", f"date={start_readable}",
+        "-metadata", f"title={title_str}",
+        "-metadata", f"comment=Início das capturas: {start_readable} | Fim: {end_readable}",
+        "-metadata", "description=Timelapse 4K UHD gerado pelo Timelapse Studio"
+    ]
+
     print("\n" + "="*66)
     print("        ETAPA 2: GERACAO DO VIDEO TIMELAPSE 4K (FFMPEG)")
     print("="*66)
     print(f"[+] Pasta de origem das fotos: {config['output_dir']}")
     print(f"[+] Total de fotos cortadas: {total_photos}")
+    print(f"[+] Início das capturas: {start_readable}")
+    print(f"[+] Término das capturas: {end_readable}")
     print(f"[+] Encoder selecionado: {encoder_name}")
     print(f"[+] Configuração: {fps} FPS | GOP: {gop_size} | B-Frames: {b_frames} | CRF: {config['crf']}")
     print(f"[+] Arquivo de saída: {os.path.basename(output_path)}")
@@ -401,6 +517,7 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False):
         "-i", "-",
         "-vf", "format=yuv420p",
         *encoder_args,
+        *metadata_args,
         "-bf", str(b_frames),
         "-g", str(gop_size),
         "-movflags", "+faststart",
@@ -453,7 +570,7 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False):
         return False, encoder_name
 
 def run_step_2_video(config, is_test=False):
-    """Etapa 2: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU se a GPU falhar."""
+    """Etapa 2: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU e metadados."""
     input_dir = os.path.abspath(config["output_dir"])
     
     if not os.path.exists(input_dir):
@@ -468,16 +585,22 @@ def run_step_2_video(config, is_test=False):
         print(f"\n[-] Erro: Nenhuma imagem JPG encontrada na pasta '{config['output_dir']}'.")
         return False
 
-    out_file = config["test_output_video"] if is_test else config["output_video"]
-    output_path = os.path.abspath(out_file)
+    video_name, first_dt, last_dt, range_str = generate_video_info(cropped_photos, is_test=is_test)
+    output_path = os.path.abspath(video_name)
 
     # Primeira tentativa (utiliza GPU se disponível)
-    success, encoder_used = render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False)
+    success, encoder_used = render_video_ffmpeg(
+        config, cropped_photos, output_path, force_cpu=False,
+        first_dt=first_dt, last_dt=last_dt, range_str=range_str
+    )
     
     # Se a GPU (ex: Intel QSV) falhar, faz fallback automático transparente para CPU (libx264)
     if not success and "CPU" not in encoder_used:
         print("\n[!] TENTANDO RENDERIZAR VIA CPU (libx264) COMO FALLBACK DE SEGURANÇA...")
-        success, _ = render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=True)
+        success, _ = render_video_ffmpeg(
+            config, cropped_photos, output_path, force_cpu=True,
+            first_dt=first_dt, last_dt=last_dt, range_str=range_str
+        )
         
     return success
 
@@ -692,6 +815,11 @@ def parse_arguments():
         help="Fator de qualidade de compressão CRF (menor = melhor qualidade, ex: 15)."
     )
     parser.add_argument(
+        "--rename-source",
+        action="store_true",
+        help="Renomeia todas as fotos da pasta de origem com o formato %%Y-%%m-%%d_%%H-%%M-%%S_<nome_original>.jpg e encerra."
+    )
+    parser.add_argument(
         "--run-all",
         action="store_true",
         help="Executa o pipeline completo (Etapa 1 + Etapa 2) e encerra sem abrir o menu interativo."
@@ -721,6 +849,11 @@ def main():
     if args.crf is not None:
         config["crf"] = args.crf
 
+    # Renomeação direta via CLI
+    if args.rename_source:
+        rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True)
+        return
+
     # Execuções automáticas diretas via CLI
     if args.run_all:
         print_banner(config)
@@ -743,6 +876,7 @@ def main():
         print("  [2] Etapa 2: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
         print("  [3] Modo Teste Rápido (Amostra de 120 fotos)")
         print("  [4] Executar Fluxo Completo (Etapa 1 + Etapa 2 Sequencialmente)")
+        print("  [R] Organizar/Renomear Fotos de Origem por EXIF (%Y-%m-%d_%H-%M-%S)")
         print("  [O] Definir/Alterar Pasta de Origem (Fotos)")
         print(f"  [C] Alterar Modo de Corte (Atual: {crop_short})")
         print(f"  [F] Alterar FPS Rapidamente (FPS Atual: {config['fps']} fps)")
@@ -751,7 +885,7 @@ def main():
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-6, O, C ou F]: ").strip().lower()
+        choice = input("Selecione uma opção [0-6, R, O, C ou F]: ").strip().lower()
         
         if choice == "1":
             run_step_1_crop(config)
@@ -764,6 +898,9 @@ def main():
             input("\nPressione Enter para continuar...")
         elif choice == "4":
             run_full_pipeline(config)
+            input("\nPressione Enter para continuar...")
+        elif choice == "r":
+            rename_source_photos(config["source_dir"], config["output_dir"])
             input("\nPressione Enter para continuar...")
         elif choice in ["o", "d"]:
             select_source_dir(config)
@@ -782,8 +919,9 @@ def main():
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Digite um número de 0 a 6, O, C ou F.")
+            print("\n[-] Opção inválida. Digite um número de 0 a 6, R, O, C ou F.")
             time.sleep(1)
 
 if __name__ == "__main__":
     main()
+
