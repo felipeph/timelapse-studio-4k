@@ -8,6 +8,7 @@ Automação em Python para processamento de fotos e renderização de timelapses
 
 - **Multicâmeras**: Compatível com GoPro, Canon, Nikon, Sony e qualquer câmera (busca automática em subpastas `DCIM` ou na raiz).
 - **Pasta de Origem Personalizada**: Suporte para definir e alterar o diretório onde estão as fotos (com suporte a drag & drop no terminal do Windows).
+- **Saída Unificada na Origem**: A pasta de fotos cortadas (`fotos_cortadas_4k`) e os arquivos de vídeo gerados (`timelapse_*.mp4`) são salvos diretamente no mesmo local da pasta de origem das fotos.
 - **Organização e Renomeação por EXIF**: Padronização dos nomes das fotos para `%Y-%m-%d_%H-%M-%S_<nome_original>.jpg` com base na data/hora do cabeçalho EXIF.
 - **Processamento 4K Paralelo com Preservação EXIF**: Redimensionamento e crop inteligente (Centro, Topo, Base) utilizando todos os núcleos da CPU via `concurrent.futures`, mantendo os dados EXIF no arquivo recortado com o sufixo `_crop4k.jpg`.
 - **Nomenclatura Dinâmica de Vídeos**: Arquivo de vídeo nomeado automaticamente com base no intervalo cronológico das capturas (`timelapse_YYYY-MM-DD_HH-MM---HH-MM.mp4`).

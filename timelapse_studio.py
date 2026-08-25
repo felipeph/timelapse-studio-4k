@@ -54,6 +54,17 @@ def sanitize_path(path_str):
     cleaned = os.path.expanduser(cleaned)
     return os.path.normpath(cleaned)
 
+def get_output_dir(config):
+    """
+    Retorna o caminho absoluto da pasta de fotos cortadas dentro da pasta de origem.
+    Se output_dir já for um caminho absoluto, mantém; caso contrário, une à pasta de origem.
+    """
+    source_dir = config.get("source_dir", ".")
+    output_dir_name = config.get("output_dir", "fotos_cortadas_4k")
+    if os.path.isabs(output_dir_name):
+        return os.path.abspath(output_dir_name)
+    return os.path.abspath(os.path.join(source_dir, output_dir_name))
+
 def print_banner(config=None):
     """Exibe o cabeçalho decorado do programa e as configurações atuais ativas."""
     print("=" * 66)
@@ -67,9 +78,11 @@ def print_banner(config=None):
         source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
         if source_dir == ".":
             source_display += " (Diretório Atual)"
+        output_dir_display = get_output_dir(config)
             
         print(" CONFIGURAÇÕES ATUAIS:")
         print(f"   • Pasta de Origem (Fotos): {source_display}")
+        print(f"   • Pasta de Cortes (4K)   : {output_dir_display}")
         print(f"   • Taxa de Quadros (FPS)  : {config['fps']} fps")
         print(f"   • Modo de Corte (Crop)    : {crop_label}")
         print(f"   • Qualidade (CRF)         : {config['crf']} (Menor = melhor qualidade)")
@@ -121,8 +134,14 @@ def get_exif_datetime(img_path):
         pass
     
     # Fallback para timestamp de modificação do arquivo no SO
-    mtime = os.path.getmtime(img_path)
-    return datetime.datetime.fromtimestamp(mtime)
+    try:
+        if os.path.exists(img_path):
+            mtime = os.path.getmtime(img_path)
+            return datetime.datetime.fromtimestamp(mtime)
+    except Exception:
+        pass
+        
+    return datetime.datetime.now()
 
 def get_exif_timestamp(img_path):
     """Extrai a data/hora original da foto via cabeçalhos EXIF (suporta GoPro, Canon, etc.)."""
@@ -149,7 +168,7 @@ def format_photo_name(img_path, dt=None):
 def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
     """
     Busca todas as fotos JPG/JPEG recursivamente na pasta informada (ex: subpastas DCIM, 138GOPRO, 100CANON, ou raiz),
-    ignorando a pasta de saída de cortes.
+    ignorando a pasta de saída de cortes e fotos já recortadas.
     """
     image_files = []
     if not base_dir or not os.path.exists(base_dir):
@@ -173,7 +192,8 @@ def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
         for file in files:
             ext = os.path.splitext(file)[1].lower()
             if ext in valid_exts:
-                image_files.append(os.path.join(root, file))
+                if not file.endswith("_crop4k.jpg") and not file.endswith("_crop4k.jpeg"):
+                    image_files.append(os.path.join(root, file))
                 
     return sorted(image_files)
 
@@ -342,7 +362,8 @@ def process_single_image(task):
 def run_step_1_crop(config, max_photos=None):
     """Etapa 1: Cortar e redimensionar fotos em paralelo via PIL preservando metadados EXIF."""
     source_dir = config.get("source_dir", ".")
-    all_photos = find_all_photos(source_dir, config["output_dir"])
+    output_dir = get_output_dir(config)
+    all_photos = find_all_photos(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
     
     if not all_photos:
         print(f"\n[-] Erro: Nenhuma foto JPG/JPEG encontrada na pasta de origem: {os.path.abspath(source_dir)}")
@@ -356,7 +377,6 @@ def run_step_1_crop(config, max_photos=None):
         all_photos = all_photos[:max_photos]
         print(f"\n[!] MODO TESTE: Limitando processamento às primeiras {len(all_photos)} fotos.")
 
-    output_dir = os.path.abspath(config["output_dir"])
     os.makedirs(output_dir, exist_ok=True)
     
     crop_mode = config.get("crop_mode", "center")
@@ -494,16 +514,19 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
         "-metadata", "description=Timelapse 4K UHD gerado pelo Timelapse Studio"
     ]
 
+    input_dir = get_output_dir(config)
+
     print("\n" + "="*66)
     print("        ETAPA 2: GERACAO DO VIDEO TIMELAPSE 4K (FFMPEG)")
     print("="*66)
-    print(f"[+] Pasta de origem das fotos: {config['output_dir']}")
+    print(f"[+] Pasta de origem das fotos: {input_dir}")
     print(f"[+] Total de fotos cortadas: {total_photos}")
     print(f"[+] Início das capturas: {start_readable}")
     print(f"[+] Término das capturas: {end_readable}")
     print(f"[+] Encoder selecionado: {encoder_name}")
     print(f"[+] Configuração: {fps} FPS | GOP: {gop_size} | B-Frames: {b_frames} | CRF: {config['crf']}")
     print(f"[+] Arquivo de saída: {os.path.basename(output_path)}")
+    print(f"[+] Pasta de destino: {os.path.dirname(output_path)}")
     print("-" * 66)
     print("[>] Enviando imagens para o FFmpeg via pipe...")
 
@@ -571,10 +594,11 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
 
 def run_step_2_video(config, is_test=False):
     """Etapa 2: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU e metadados."""
-    input_dir = os.path.abspath(config["output_dir"])
+    input_dir = get_output_dir(config)
+    source_dir = config.get("source_dir", ".")
     
     if not os.path.exists(input_dir):
-        print(f"\n[-] Erro: A pasta '{config['output_dir']}' não foi encontrada.")
+        print(f"\n[-] Erro: A pasta '{input_dir}' não foi encontrada.")
         print("    Por favor, execute a Etapa 1 primeiro para gerar as fotos cortadas.")
         return False
 
@@ -582,11 +606,11 @@ def run_step_2_video(config, is_test=False):
     cropped_photos = sorted(glob.glob(pattern))
 
     if not cropped_photos:
-        print(f"\n[-] Erro: Nenhuma imagem JPG encontrada na pasta '{config['output_dir']}'.")
+        print(f"\n[-] Erro: Nenhuma imagem JPG encontrada na pasta '{input_dir}'.")
         return False
 
     video_name, first_dt, last_dt, range_str = generate_video_info(cropped_photos, is_test=is_test)
-    output_path = os.path.abspath(video_name)
+    output_path = os.path.abspath(os.path.join(source_dir, video_name))
 
     # Primeira tentativa (utiliza GPU se disponível)
     success, encoder_used = render_video_ffmpeg(
@@ -699,7 +723,7 @@ def run_full_pipeline(config):
 
 def clean_manager(config):
     """Menu utilitário para limpeza de fotos cortadas e arquivos temporários."""
-    output_dir = os.path.abspath(config["output_dir"])
+    output_dir = get_output_dir(config)
     
     while True:
         print("\n" + "="*66)
@@ -713,7 +737,7 @@ def clean_manager(config):
             for f in glob.glob(os.path.join(output_dir, "*.jpg")):
                 cropped_size_mb += os.path.getsize(f) / (1024 * 1024)
                 
-        print(f"[1] Fotos cortadas em '{config['output_dir']}': {cropped_count} arquivos ({cropped_size_mb:.2f} MB)")
+        print(f"[1] Fotos cortadas em '{output_dir}': {cropped_count} arquivos ({cropped_size_mb:.2f} MB)")
         print("[2] Apagar a pasta de fotos cortadas")
         print("[0] Voltar ao Menu Principal")
         print("-" * 66)
@@ -721,11 +745,11 @@ def clean_manager(config):
         choice = input("Escolha uma opção: ").strip()
         if choice == "2":
             if has_cropped:
-                confirm = input(f"Tem certeza que deseja apagar a pasta '{config['output_dir']}'? (s/N): ").strip().lower()
+                confirm = input(f"Tem certeza que deseja apagar a pasta '{output_dir}'? (s/N): ").strip().lower()
                 if confirm == 's':
                     import shutil
                     shutil.rmtree(output_dir)
-                    print(f"[+] Pasta '{config['output_dir']}' removida com sucesso!")
+                    print(f"[+] Pasta '{output_dir}' removida com sucesso!")
             else:
                 print("[!] A pasta de fotos cortadas já não existe.")
         elif choice == "0":
@@ -739,11 +763,13 @@ def edit_settings(config):
         source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
         if source_dir == ".":
             source_display += " (Diretório Atual)"
+        output_dir_display = get_output_dir(config)
             
         print("\n" + "="*66)
         print("               CONFIGURAÇÕES DO TIMELAPSE STUDIO")
         print("="*66)
         print(f"[1] Pasta de Origem (Fotos): {source_display}")
+        print(f"    ↳ Pasta de Cortes (4K) : {output_dir_display}")
         print(f"[2] Taxa de Quadros (FPS)  : {config['fps']} fps")
         print(f"[3] Modo de Corte (Crop)    : {crop_label}")
         print(f"[4] Qualidade FFmpeg (CRF)  : {config['crf']}")
