@@ -28,6 +28,8 @@ from PIL import Image, ExifTags
 
 import logger
 import youtube_uploader
+import tracker
+import notifier
 
 CONFIG_FILE = "config.json"
 
@@ -48,7 +50,9 @@ DEFAULT_CONFIG = {
     "auto_clean_crops": True,
     "youtube_auto_upload": True,
     "youtube_privacy_status": "unlisted",
-    "youtube_category_id": "22"
+    "youtube_category_id": "22",
+    "stage_interval_seconds": 180,
+    "ntfy_topic": "timelapse-studio-2026"
 }
 
 def load_config(config_path=CONFIG_FILE):
@@ -79,7 +83,8 @@ def save_config(config, config_path=CONFIG_FILE):
             "source_dir", "output_dir", "fps", "frames_per_image", 
             "crop_mode", "crf", "preset", "target_width", 
             "target_height", "test_sample_size", "output_video", "test_output_video",
-            "auto_clean_crops", "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id"
+            "auto_clean_crops", "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id",
+            "stage_interval_seconds", "ntfy_topic"
         ]
         save_dict = {k: config[k] for k in keys_to_save if k in config}
         with open(config_path, "w", encoding="utf-8") as f:
@@ -209,7 +214,12 @@ def print_banner(config=None, project_id=None):
         yt_privacy = config.get("youtube_privacy_status", "unlisted")
         yt_status = f"Ativado ({yt_privacy})" if yt_auto else "Desativado"
             
+        completed_summary = tracker.get_completed_stages_summary(project_id)
+        stage_interval = config.get("stage_interval_seconds", 180)
+        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
+            
         print(f" PROJETO ATUAL: {project_id}")
+        print(f" ETAPAS CONCLUÍDAS: {completed_summary}")
         print("-" * 66)
         print(" CONFIGURAÇÕES ATUAIS:")
         print(f"   • Pasta de Origem (Fotos): {source_display}")
@@ -222,6 +232,8 @@ def print_banner(config=None, project_id=None):
         print(f"   • Amostra Modo Teste      : {config['test_sample_size']} fotos")
         print(f"   • Limpeza Pós-Vídeo       : {clean_status}")
         print(f"   • Upload YouTube          : {yt_status}")
+        print(f"   • Intervalo entre Etapas  : {stage_interval}s (Pausa interativa)")
+        print(f"   • Notificações            : Toast Windows + NTFY ({ntfy_topic})")
         print("=" * 66)
 
 def print_progress_bar(current, total, start_time, prefix="Progresso"):
@@ -377,19 +389,22 @@ def select_source_dir(config):
     else:
         print("[-] Opção inválida. Pasta de origem mantida.")
 
-def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_interactive=False):
+def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_interactive=False, project_id=None, config=None):
     """
     Renomeia todas as fotos JPG/JPEG na pasta de origem com a data/hora do EXIF:
     %Y-%m-%d_%H-%M-%S_<nome_original>.jpg
     """
+    if not project_id:
+        project_id = logger.get_project_id(source_dir, output_dir_name)
     photos = find_all_photos(source_dir, output_dir_name)
     if not photos:
         print(f"\n[-] Nenhuma foto encontrada em {os.path.abspath(source_dir)} para renomear.")
         return 0
         
     print("\n" + "=" * 66)
-    print("      ORGANIZAÇÃO E RENOMEAÇÃO DE FOTOS POR EXIF")
+    print("      ETAPA 1: ORGANIZAÇÃO E RENOMEAÇÃO DE FOTOS POR EXIF")
     print("=" * 66)
+    print(f"[+] Projeto: {project_id}")
     print(f"[+] Pasta de origem: {os.path.abspath(source_dir)}")
     print(f"[+] Total de fotos encontradas: {len(photos)}")
     print("[+] Formato alvo: %Y-%m-%d_%H-%M-%S_<nome_original>.jpg")
@@ -401,6 +416,7 @@ def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_in
             print("[+] Operação cancelada pelo usuário.")
             return 0
             
+    tracker.update_stage_status(project_id, "etapa_1", "in_progress")
     renamed_count = 0
     for img_path in photos:
         dir_name = os.path.dirname(img_path)
@@ -418,6 +434,12 @@ def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_in
                     
     print(f"[+] Concluído! {renamed_count} arquivos renomeados com sucesso.")
     print("=" * 66)
+    
+    # Atualiza tracking e dispara notificações
+    tracker.update_stage_status(project_id, "etapa_1", "completed", details=f"{renamed_count} fotos renomeadas ({len(photos)} fotos totais)")
+    logger.log_event(project_id, "etapa_1_rename", f"Fotos renomeadas por EXIF: {renamed_count} arquivos.")
+    ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026") if config else "timelapse-studio-2026"
+    notifier.notify_stage_completion(project_id, 1, "Organização e Renomeação EXIF", details=f"{renamed_count} fotos renomeadas ({len(photos)} fotos totais)", ntfy_topic=ntfy_topic)
     return renamed_count
 
 def process_single_image(task):
@@ -517,9 +539,13 @@ def run_step_1_crop(config, max_photos=None):
     crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode)
     
     total = len(all_photos)
+    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    tracker.update_stage_status(project_id, "etapa_2", "in_progress")
+
     print("\n" + "="*66)
-    print("        ETAPA 1: CORTE 16:9 E REDIMENSIONAMENTO 4K (PIL)")
+    print("        ETAPA 2: CORTE 16:9 E REDIMENSIONAMENTO 4K (PIL)")
     print("="*66)
+    print(f"[+] Projeto: {project_id}")
     print(f"[+] Pasta de origem: {os.path.abspath(source_dir)}")
     print(f"[+] Fotos localizadas: {total}")
     print(f"[+] Modo de corte: {crop_label}")
@@ -552,12 +578,17 @@ def run_step_1_crop(config, max_photos=None):
     print("-" * 66)
     if errors == 0:
         print(f"[+] Sucesso! {completed} fotos processadas em {total_time:.1f} segundos ({completed/total_time:.1f} fotos/s).")
+        tracker.update_stage_status(project_id, "etapa_2", "completed", details=f"{completed} fotos cortadas em {total_time:.1f}s ({completed/total_time:.1f} fotos/s)")
+        logger.log_event(project_id, "etapa_2_crop", f"{completed} fotos cortadas 4K com sucesso em {total_time:.1f}s.")
+        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
+        notifier.notify_stage_completion(project_id, 2, "Corte e Redimensionamento 4K", details=f"{completed} fotos processadas em {total_time:.1f}s ({completed/total_time:.1f} fotos/s)", ntfy_topic=ntfy_topic)
     else:
         print(f"[!] Concluído com {errors} erros de {completed} fotos processadas.")
+        tracker.update_stage_status(project_id, "etapa_2", "failed", details=f"{errors} erros de {completed} fotos processadas")
         
     print(f"[+] Fotos salvas em: {output_dir}")
     print("=" * 66)
-    return True, output_dir
+    return errors == 0, output_dir
 
 def detect_ffmpeg_encoder(preset, crf, force_cpu=False):
     """Detecta se há suporte a GPU (NVIDIA NVENC, AMD AMF, Intel QSV) ou faz fallback para CPU libx264."""
@@ -756,6 +787,7 @@ def run_step_2_video(config, is_test=False):
     video_name, first_dt, last_dt, range_str = generate_video_info(cropped_photos, is_test=is_test)
     output_path = os.path.abspath(os.path.join(source_dir, video_name))
 
+    tracker.update_stage_status(project_id, "etapa_3", "in_progress")
     # Primeira tentativa (utiliza GPU se disponível)
     success, encoder_used = render_video_ffmpeg(
         config, cropped_photos, output_path, force_cpu=False,
@@ -772,9 +804,13 @@ def run_step_2_video(config, is_test=False):
         )
         
     if success:
+        tracker.update_stage_status(project_id, "etapa_3", "completed", details=f"Vídeo: {os.path.basename(output_path)} ({encoder_used})", extra_data={"video_path": output_path})
         logger.log_event(project_id, "etapa_3_video", f"Vídeo renderizado com sucesso: {output_path} ({encoder_used})")
+        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
+        notifier.notify_stage_completion(project_id, 3, "Renderização de Vídeo 4K", details=f"Arquivo: {os.path.basename(output_path)} ({encoder_used})", ntfy_topic=ntfy_topic)
         return True, output_path
     else:
+        tracker.update_stage_status(project_id, "etapa_3", "failed", details=f"Falha na renderização de {output_path}")
         logger.log_event(project_id, "etapa_3_video", f"Falha na renderização de: {output_path}", level="ERROR")
         return False, None
 
@@ -928,6 +964,7 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
     if not os.path.exists(output_dir):
         if not non_interactive:
             print("\n[!] A pasta de fotos cortadas já não existe ou já foi limpa.")
+        tracker.update_stage_status(project_id, "etapa_4", "completed", details="Pasta de cortes já inexistente ou limpa")
         return True
         
     photos = glob.glob(os.path.join(output_dir, "*.jpg"))
@@ -937,6 +974,7 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
     print("\n" + "=" * 66)
     print("      ETAPA 4: LIMPEZA DE FOTOS CORTADAS INTERMEDIÁRIAS")
     print("=" * 66)
+    print(f"[+] Projeto: {project_id}")
     print(f"[+] Pasta de fotos cortadas: {output_dir}")
     print(f"[+] Total de arquivos temporários: {total_files} ({size_mb:.2f} MB)")
     print("-" * 66)
@@ -947,15 +985,20 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
             print("[+] Limpeza cancelada pelo usuário. Arquivos mantidos.")
             return False
             
+    tracker.update_stage_status(project_id, "etapa_4", "in_progress")
     try:
         import shutil
         shutil.rmtree(output_dir)
         print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({size_mb:.2f} MB liberados).")
         print("=" * 66)
+        tracker.update_stage_status(project_id, "etapa_4", "completed", details=f"{total_files} arquivos temporários apagados ({size_mb:.2f} MB liberados)")
         logger.log_event(project_id, "etapa_4_clean", f"Pasta '{output_dir}' apagada com sucesso ({total_files} arquivos, {size_mb:.2f} MB liberados).")
+        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
+        notifier.notify_stage_completion(project_id, 4, "Limpeza de Fotos Intermediárias", details=f"{total_files} fotos apagadas ({size_mb:.2f} MB liberados)", ntfy_topic=ntfy_topic)
         return True
     except Exception as e:
         print(f"[-] Erro ao remover a pasta '{output_dir}': {e}")
+        tracker.update_stage_status(project_id, "etapa_4", "failed", details=f"Erro ao remover: {e}")
         logger.log_event(project_id, "etapa_4_clean", f"Erro ao remover '{output_dir}': {e}", level="ERROR")
         return False
 
@@ -1030,8 +1073,80 @@ def run_step_5_youtube_upload(config, video_path=None, project_id=None):
         "category_id": category
     }
     
+    tracker.update_stage_status(project_id, "etapa_5", "in_progress")
     success, url, vid = youtube_uploader.upload_video_resumable(video_path, metadata=metadata, project_id=project_id)
+    ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
+    
+    if success and url:
+        tracker.update_stage_status(project_id, "etapa_5", "completed", details=f"Publicado no YouTube: {url}", extra_data={"youtube_url": url, "video_id": vid})
+        notifier.notify_stage_completion(project_id, 5, "Publicação no YouTube", details=f"Vídeo publicado com sucesso ({privacy.upper()})", youtube_url=url, ntfy_topic=ntfy_topic)
+    else:
+        tracker.update_stage_status(project_id, "etapa_5", "failed", details="Falha no upload para o YouTube")
+        
     return success, url
+
+def wait_stage_interval(seconds=180, next_stage_name="Próxima Etapa", current_stage_name="Etapa Concluída"):
+    """
+    Exibe uma contagem regressiva interativa entre etapas (padrão: 180s / 3 minutos)
+    com opções de avançar imediatamente ([ENTER]/[ESPAÇO]), pausar ([P]) ou cancelar ([C]/[Q]).
+    Retorna True se deve prosseguir ou False se foi cancelado pelo usuário.
+    """
+    if seconds <= 0:
+        return True
+
+    print("\n" + "=" * 66)
+    print(f" ⏳ {current_stage_name.upper()} CONCLUÍDA COM SUCESSO!")
+    print(f" ⏱️  Intervalo de segurança: {seconds}s (3 min) antes de iniciar {next_stage_name}")
+    print(" [ENTER/ESPAÇO] Avançar Imediatamente | [P] Pausar | [C/Q] Cancelar Fluxo")
+    print("-" * 66)
+    
+    msvcrt = None
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
+
+    remaining = seconds
+    paused = False
+    
+    while remaining > 0 or paused:
+        if msvcrt and msvcrt.kbhit():
+            ch = msvcrt.getch()
+            try:
+                ch_str = ch.decode('utf-8', errors='ignore').lower()
+            except Exception:
+                ch_str = ""
+                
+            if ch in [b'\r', b'\n', b' ']:
+                sys.stdout.write(f"\r[+] Avançando imediatamente para: {next_stage_name}               \n")
+                sys.stdout.flush()
+                return True
+            elif ch_str in ['p', 'P']:
+                paused = not paused
+                if paused:
+                    sys.stdout.write(f"\r⏸️  FLUXO PAUSADO! Pressione [P] ou [ENTER] para retomar...          ")
+                    sys.stdout.flush()
+                else:
+                    sys.stdout.write(f"\r▶️  Fluxo retomado! Continuando contagem...                        \n")
+                    sys.stdout.flush()
+            elif ch_str in ['c', 'C', 'q', 'Q', '\x1b']:
+                sys.stdout.write(f"\n[!] Fluxo cancelado pelo usuário durante o intervalo de segurança.\n")
+                sys.stdout.flush()
+                return False
+                
+        if not paused:
+            mins, secs = divmod(remaining, 60)
+            sys.stdout.write(f"\r⏳ Próxima etapa em: {mins:02d}:{secs:02d} | [ENTER] Avançar | [P] Pausa | [C] Cancelar... ")
+            sys.stdout.flush()
+            time.sleep(1.0)
+            remaining -= 1
+        else:
+            time.sleep(0.5)
+
+    sys.stdout.write(f"\r[+] Intervalo concluído! Iniciando {next_stage_name}...                       \n")
+    sys.stdout.flush()
+    return True
 
 def run_full_pipeline(config):
     """
@@ -1052,6 +1167,7 @@ def run_full_pipeline(config):
     auto_clean = config.get("auto_clean_crops", True)
     yt_auto = config.get("youtube_auto_upload", True)
     yt_priv = config.get("youtube_privacy_status", "unlisted")
+    interval_s = config.get("stage_interval_seconds", 180)
     
     print("\n" + "=" * 66)
     print("      INICIANDO FLUXO COMPLETO (ETAPAS 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
@@ -1060,15 +1176,20 @@ def run_full_pipeline(config):
     print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
     print(f"    Limpeza pós-vídeo : {'Ativada' if auto_clean else 'Desativada'}")
     print(f"    Upload YouTube    : {'Ativado (' + yt_priv + ')' if yt_auto else 'Desativado'}")
+    print(f"    Pausa entre etapas: {interval_s}s (3 min)")
     print("-" * 66)
     
     logger.log_event(project_id, "resumo_projeto", f"Iniciando Fluxo Completo | FPS: {fps} | FPI: {fpi} | CRF: {config['crf']}")
     
     # Etapa 1: Renomear fotos de origem por EXIF
     print("\n>>> [1/5] ETAPA 1: Organizando e Renomeando Fotos de Origem por EXIF...")
-    renamed = rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True)
-    logger.log_event(project_id, "etapa_1_rename", f"Fotos renomeadas por EXIF: {renamed} arquivos.")
+    renamed = rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True, project_id=project_id, config=config)
     
+    # Intervalo de segurança após Etapa 1
+    if not wait_stage_interval(interval_s, "Etapa 2 (Corte e Redimensionamento 4K)", "Etapa 1 (Renomeação EXIF)"):
+        print("\n[!] Fluxo cancelado após a Etapa 1. Status salvo.")
+        return
+        
     # Etapa 2: Cortar e Redimensionar Fotos para 4K
     print("\n>>> [2/5] ETAPA 2: Cortando e Redimensionando Fotos para 4K UHD...")
     crop_ok, _ = run_step_1_crop(config)
@@ -1076,6 +1197,11 @@ def run_full_pipeline(config):
         msg = "Interrompendo pipeline: falha na Etapa 2 (Corte)."
         print(f"\n[-] {msg}")
         logger.log_event(project_id, "resumo_projeto", msg, level="ERROR")
+        return
+        
+    # Intervalo de segurança após Etapa 2
+    if not wait_stage_interval(interval_s, "Etapa 3 (Renderização de Vídeo 4K)", "Etapa 2 (Corte 4K)"):
+        print("\n[!] Fluxo cancelado após a Etapa 2. Status salvo.")
         return
         
     # Etapa 3: Renderizar Vídeo Timelapse 4K
@@ -1089,6 +1215,9 @@ def run_full_pipeline(config):
         
     # Etapa 4: Limpeza das fotos cortadas intermediárias
     if auto_clean:
+        if not wait_stage_interval(interval_s, "Etapa 4 (Limpeza de Fotos Temporárias)", "Etapa 3 (Renderização de Vídeo)"):
+            print("\n[!] Fluxo cancelado após a Etapa 3. Vídeo gerado foi mantido.")
+            return
         print("\n>>> [4/5] ETAPA 4: Limpando Fotos Cortadas Intermediárias...")
         run_step_4_clean_crops(config, non_interactive=True, project_id=project_id)
     else:
@@ -1097,6 +1226,12 @@ def run_full_pipeline(config):
     # Etapa 5: Publicação no YouTube
     yt_url = None
     if yt_auto:
+        next_etapa_label = "Etapa 5 (Publicação no YouTube)"
+        prev_etapa_label = "Etapa 4 (Limpeza)" if auto_clean else "Etapa 3 (Renderização de Vídeo)"
+        if not wait_stage_interval(interval_s, next_etapa_label, prev_etapa_label):
+            print("\n[!] Fluxo cancelado antes do upload. O vídeo local foi mantido.")
+            return
+            
         print("\n>>> [5/5] ETAPA 5: Publicando Vídeo no YouTube...")
         yt_ok, yt_url = run_step_5_youtube_upload(config, video_path=video_path, project_id=project_id)
         if not yt_ok:
@@ -1136,6 +1271,8 @@ def edit_settings(config, config_path=CONFIG_FILE):
         yt_auto = config.get("youtube_auto_upload", True)
         yt_privacy = config.get("youtube_privacy_status", "unlisted")
         yt_status = "Ativado (Etapa 5 no fluxo completo)" if yt_auto else "Desativado"
+        stage_interval = config.get("stage_interval_seconds", 180)
+        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
             
         print("\n" + "="*66)
         print("               CONFIGURAÇÕES DO TIMELAPSE STUDIO")
@@ -1151,14 +1288,16 @@ def edit_settings(config, config_path=CONFIG_FILE):
         print(f"[8]  Limpeza Automática Pós-Vídeo : {clean_status}")
         print(f"[9]  Upload Automático ao YouTube : {yt_status}")
         print(f"[10] Privacidade no YouTube      : {yt_privacy} (unlisted / private / public)")
-        print(f"[11] Amostragem Modo Teste       : {config['test_sample_size']} fotos")
+        print(f"[11] Intervalo entre Etapas (s)  : {stage_interval}s ({stage_interval/60:.1f} min)")
+        print(f"[12] Canal de Notificações NTFY  : {ntfy_topic}")
+        print(f"[13] Amostragem Modo Teste       : {config['test_sample_size']} fotos")
         print("-" * 66)
         print(f"[S] Salvar Configurações Atuais no '{config_path}'")
         print("[D] Restaurar Configurações Padrão de Fábrica (Reset)")
         print("[0] Voltar ao Menu Principal")
         print("=" * 66)
         
-        choice = input("Escolha uma opção [0-11, S ou D]: ").strip().lower()
+        choice = input("Escolha uma opção [0-13, S ou D]: ").strip().lower()
         if choice == "1":
             select_source_dir(config)
         elif choice == "2":
@@ -1204,6 +1343,18 @@ def edit_settings(config, config_path=CONFIG_FILE):
             print(f"[+] Privacidade alterada para: {config['youtube_privacy_status']}")
             time.sleep(1.0)
         elif choice == "11":
+            val = input(f"Intervalo de espera entre etapas em segundos [{config.get('stage_interval_seconds', 180)}]: ").strip()
+            if val.isdigit() and int(val) >= 0:
+                config["stage_interval_seconds"] = int(val)
+                print(f"[+] Intervalo entre etapas alterado para {config['stage_interval_seconds']} segundos.")
+                time.sleep(1.0)
+        elif choice == "12":
+            val = input(f"Novo Canal NTFY [{config.get('ntfy_topic', 'timelapse-studio-2026')}]: ").strip()
+            if val:
+                config["ntfy_topic"] = val
+                print(f"[+] Canal NTFY alterado para: {config['ntfy_topic']}")
+                time.sleep(1.0)
+        elif choice == "13":
             val = input(f"Nº de Fotos no Teste [{config['test_sample_size']}]: ").strip()
             if val.isdigit():
                 config["test_sample_size"] = int(val)
@@ -1339,7 +1490,7 @@ def main():
 
     # Renomeação direta via CLI
     if args.rename_source:
-        rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True)
+        rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True, config=config)
         return
 
     # Execuções automáticas diretas via CLI
@@ -1380,7 +1531,7 @@ def main():
             run_full_pipeline(config)
             input("\nPressione Enter para continuar...")
         elif choice == "1":
-            rename_source_photos(config["source_dir"], config["output_dir"])
+            rename_source_photos(config["source_dir"], config["output_dir"], project_id=project_id, config=config)
             input("\nPressione Enter para continuar...")
         elif choice == "2":
             run_step_1_crop(config)
