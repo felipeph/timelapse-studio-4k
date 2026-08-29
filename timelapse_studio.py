@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "target_width": 3840,
     "target_height": 2160,
     "fps": 60,
+    "frames_per_image": 1,
     "crf": 15,
     "preset": "ultrafast",
     "crop_mode": "center",
@@ -79,11 +80,15 @@ def print_banner(config=None):
         if source_dir == ".":
             source_display += " (Diretório Atual)"
         output_dir_display = get_output_dir(config)
+        fps = config.get("fps", 60)
+        fpi = config.get("frames_per_image", 1)
+        dur_per_photo = fpi / fps if fps > 0 else 0
             
         print(" CONFIGURAÇÕES ATUAIS:")
         print(f"   • Pasta de Origem (Fotos): {source_display}")
         print(f"   • Pasta de Cortes (4K)   : {output_dir_display}")
-        print(f"   • Taxa de Quadros (FPS)  : {config['fps']} fps")
+        print(f"   • Taxa de Quadros (FPS)  : {fps} fps")
+        print(f"   • Frames por Imagem (FPI): {fpi} frame(s)/foto ({dur_per_photo:.2f}s por foto)")
         print(f"   • Modo de Corte (Crop)    : {crop_label}")
         print(f"   • Qualidade (CRF)         : {config['crf']} (Menor = melhor qualidade)")
         print(f"   • Resolução Alvo          : {config['target_width']}x{config['target_height']} (4K UHD)")
@@ -485,6 +490,10 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
     """Executa a renderização do FFmpeg via pipe com cálculo seguro de GOP, B-frames e injeção de metadados."""
     total_photos = len(cropped_photos)
     fps = config["fps"]
+    frames_per_image = max(1, config.get("frames_per_image", 1))
+    total_video_frames = total_photos * frames_per_image
+    duration_sec = total_video_frames / fps if fps > 0 else 0
+    sec_per_photo = frames_per_image / fps if fps > 0 else 0
     
     if first_dt is None and cropped_photos:
         first_dt = get_exif_datetime(cropped_photos[0])
@@ -524,7 +533,9 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
     print(f"[+] Início das capturas: {start_readable}")
     print(f"[+] Término das capturas: {end_readable}")
     print(f"[+] Encoder selecionado: {encoder_name}")
-    print(f"[+] Configuração: {fps} FPS | GOP: {gop_size} | B-Frames: {b_frames} | CRF: {config['crf']}")
+    print(f"[+] Configuração: {fps} FPS | {frames_per_image} frame(s)/foto ({sec_per_photo:.2f}s/foto)")
+    print(f"[+] Duração estimada: {duration_sec:.1f}s ({total_video_frames} quadros)")
+    print(f"[+] GOP: {gop_size} | B-Frames: {b_frames} | CRF: {config['crf']}")
     print(f"[+] Arquivo de saída: {os.path.basename(output_path)}")
     print(f"[+] Pasta de destino: {os.path.dirname(output_path)}")
     print("-" * 66)
@@ -536,9 +547,10 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
         "-y",
         "-f", "image2pipe",
         "-vcodec", "mjpeg",
-        "-r", str(fps),
+        "-framerate", f"{fps}/{frames_per_image}",
         "-i", "-",
         "-vf", "format=yuv420p",
+        "-r", str(fps),
         *encoder_args,
         *metadata_args,
         "-bf", str(b_frames),
@@ -695,16 +707,66 @@ def quick_change_fps(config):
     elif choice == "0":
         print("[+] Manter FPS atual.")
 
-def run_test_mode(config):
-    """Executa as Etapas 1 e 2 em modo de teste rápido com amostragem reduzida e confirmação de FPS."""
-    crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
-    print(f"\n[!] INICIANDO MODO TESTE RÁPIDO ({config['test_sample_size']} FOTOS)")
-    print(f"    FPS: {config['fps']} fps | Modo de corte: {crop_short}")
+def quick_change_fpi(config):
+    """Menu de atalho rápido para alterar a quantidade de frames exibidos por cada imagem/foto."""
+    fps = config.get("fps", 60)
+    current_fpi = config.get("frames_per_image", 1)
+    current_sec = current_fpi / fps if fps > 0 else 0
+    print("\n" + "="*66)
+    print("        AJUSTE RÁPIDO DE FRAMES POR IMAGEM / FOTO (FPI)")
+    print("="*66)
+    print(f"Taxa de Quadros (FPS de Saída) : {fps} fps")
+    print(f"Frames por Imagem Atual (FPI)  : {current_fpi} frame(s)/foto ({current_sec:.2f}s por foto)")
+    print("\nEscolha uma opção predefinida:")
+    print(f"  [1] 1 frame por foto    (Padrão - {1/fps:.2f}s por foto / velocidade máxima)")
+    print(f"  [2] 2 frames por foto   ({2/fps:.2f}s por foto / 2x mais lento)")
+    print(f"  [3] {max(1, fps//2)} frames por foto   ({max(1, fps//2)/fps:.2f}s por foto / meia velocidade)")
+    print(f"  [4] {fps} frames por foto   (1.00s por foto / 1 foto por segundo)")
+    print(f"  [5] {fps*2} frames por foto  (2.00s por foto / 2 segundos por foto)")
+    print("  [6] Digitar um valor personalizado de frames por imagem...")
+    print("  [0] Cancelar / Manter valor atual")
+    print("-" * 66)
     
-    change_prompt = input("Deseja alterar FPS, Pasta de Origem ou Modo de Corte antes do teste? (s/N): ").strip().lower()
+    choice = input("Escolha uma opção [0-6]: ").strip()
+    if choice == "1":
+        config["frames_per_image"] = 1
+        print(f"[+] Frames por imagem alterado para 1 frame ({1/fps:.2f}s por foto).")
+    elif choice == "2":
+        config["frames_per_image"] = 2
+        print(f"[+] Frames por imagem alterado para 2 frames ({2/fps:.2f}s por foto).")
+    elif choice == "3":
+        config["frames_per_image"] = max(1, fps // 2)
+        print(f"[+] Frames por imagem alterado para {config['frames_per_image']} frames ({config['frames_per_image']/fps:.2f}s por foto).")
+    elif choice == "4":
+        config["frames_per_image"] = fps
+        print(f"[+] Frames por imagem alterado para {config['frames_per_image']} frames (1.00s por foto).")
+    elif choice == "5":
+        config["frames_per_image"] = fps * 2
+        print(f"[+] Frames por imagem alterado para {config['frames_per_image']} frames (2.00s por foto).")
+    elif choice == "6":
+        val = input("Digite a quantidade de frames por imagem (ex: 1, 2, 15, 30, 60, 120): ").strip()
+        if val.isdigit() and int(val) > 0:
+            config["frames_per_image"] = int(val)
+            print(f"[+] Frames por imagem alterado para {config['frames_per_image']} frames ({config['frames_per_image']/fps:.2f}s por foto).")
+        else:
+            print("[-] Valor inválido. O valor atual foi mantido.")
+    elif choice == "0":
+        print("[+] Frames por imagem mantido.")
+
+def run_test_mode(config):
+    """Executa as Etapas 1 e 2 em modo de teste rápido com amostragem reduzida e confirmação de parâmetros."""
+    crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
+    fps = config.get("fps", 60)
+    fpi = config.get("frames_per_image", 1)
+    dur_photo = fpi / fps if fps > 0 else 0
+    print(f"\n[!] INICIANDO MODO TESTE RÁPIDO ({config['test_sample_size']} FOTOS)")
+    print(f"    FPS: {fps} fps | Frames/Foto: {fpi} ({dur_photo:.2f}s/foto) | Corte: {crop_short}")
+    
+    change_prompt = input("Deseja alterar FPS/Frames por Foto, Pasta de Origem ou Modo de Corte antes do teste? (s/N): ").strip().lower()
     if change_prompt == 's':
         select_source_dir(config)
         quick_change_fps(config)
+        quick_change_fpi(config)
         quick_change_crop(config)
         
     success, _ = run_step_1_crop(config, max_photos=config["test_sample_size"])
@@ -714,8 +776,11 @@ def run_test_mode(config):
 def run_full_pipeline(config):
     """Executa o fluxo completo (Etapa 1 + Etapa 2 sequencialmente)."""
     crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
+    fps = config.get("fps", 60)
+    fpi = config.get("frames_per_image", 1)
+    dur_photo = fpi / fps if fps > 0 else 0
     print("\n[!] INICIANDO FLUXO COMPLETO (ETAPA 1 + ETAPA 2)")
-    print(f"    Configuração: {config['fps']} FPS | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
+    print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
     
     success, _ = run_step_1_crop(config)
     if success:
@@ -764,18 +829,22 @@ def edit_settings(config):
         if source_dir == ".":
             source_display += " (Diretório Atual)"
         output_dir_display = get_output_dir(config)
+        fps = config.get("fps", 60)
+        fpi = config.get("frames_per_image", 1)
+        dur_photo = fpi / fps if fps > 0 else 0
             
         print("\n" + "="*66)
         print("               CONFIGURAÇÕES DO TIMELAPSE STUDIO")
         print("="*66)
-        print(f"[1] Pasta de Origem (Fotos): {source_display}")
-        print(f"    ↳ Pasta de Cortes (4K) : {output_dir_display}")
-        print(f"[2] Taxa de Quadros (FPS)  : {config['fps']} fps")
-        print(f"[3] Modo de Corte (Crop)    : {crop_label}")
-        print(f"[4] Qualidade FFmpeg (CRF)  : {config['crf']}")
-        print(f"[5] Resolução de saída      : {config['target_width']}x{config['target_height']}")
-        print(f"[6] Amostragem Modo Teste   : {config['test_sample_size']} fotos")
-        print(f"[7] Preset FFmpeg           : {config['preset']}")
+        print(f"[1] Pasta de Origem (Fotos) : {source_display}")
+        print(f"    ↳ Pasta de Cortes (4K)  : {output_dir_display}")
+        print(f"[2] Taxa de Quadros (FPS)   : {fps} fps")
+        print(f"[3] Frames por Imagem (FPI) : {fpi} frame(s)/foto ({dur_photo:.2f}s por foto)")
+        print(f"[4] Modo de Corte (Crop)     : {crop_label}")
+        print(f"[5] Qualidade FFmpeg (CRF)   : {config['crf']}")
+        print(f"[6] Resolução de saída       : {config['target_width']}x{config['target_height']}")
+        print(f"[7] Amostragem Modo Teste    : {config['test_sample_size']} fotos")
+        print(f"[8] Preset FFmpeg            : {config['preset']}")
         print("[0] Salvar e Voltar ao Menu Principal")
         print("-" * 66)
         
@@ -785,22 +854,24 @@ def edit_settings(config):
         elif choice == "2":
             quick_change_fps(config)
         elif choice == "3":
-            quick_change_crop(config)
+            quick_change_fpi(config)
         elif choice == "4":
+            quick_change_crop(config)
+        elif choice == "5":
             val = input(f"Novo CRF [{config['crf']}]: ").strip()
             if val.isdigit():
                 config["crf"] = int(val)
-        elif choice == "5":
+        elif choice == "6":
             w = input(f"Largura [{config['target_width']}]: ").strip()
             h = input(f"Altura [{config['target_height']}]: ").strip()
             if w.isdigit() and h.isdigit():
                 config["target_width"] = int(w)
                 config["target_height"] = int(h)
-        elif choice == "6":
+        elif choice == "7":
             val = input(f"Nº de Fotos no Teste [{config['test_sample_size']}]: ").strip()
             if val.isdigit():
                 config["test_sample_size"] = int(val)
-        elif choice == "7":
+        elif choice == "8":
             val = input(f"Novo Preset (ultrafast/medium/slow) [{config['preset']}]: ").strip()
             if val in ["ultrafast", "medium", "slow"]:
                 config["preset"] = val
@@ -825,6 +896,13 @@ def parse_arguments():
         type=int,
         default=None,
         help="Taxa de quadros por segundo (ex: 15, 24, 30, 60)."
+    )
+    parser.add_argument(
+        "-fpi", "--fpi", "--frames-per-image",
+        dest="frames_per_image",
+        type=int,
+        default=None,
+        help="Número de frames exibidos por cada foto no vídeo (ex: 60 para manter 1 foto/s em 60fps, padrão: 1)."
     )
     parser.add_argument(
         "--crop",
@@ -870,6 +948,8 @@ def main():
             
     if args.fps:
         config["fps"] = args.fps
+    if args.frames_per_image and args.frames_per_image > 0:
+        config["frames_per_image"] = args.frames_per_image
     if args.crop_mode:
         config["crop_mode"] = args.crop_mode
     if args.crf is not None:
@@ -896,6 +976,9 @@ def main():
     # Modo interativo CLI
     while True:
         crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
+        fps = config.get("fps", 60)
+        fpi = config.get("frames_per_image", 1)
+        dur_photo = fpi / fps if fps > 0 else 0
         print_banner(config)
         print("MENU PRINCIPAL:")
         print("  [1] Etapa 1: Cortar e Redimensionar Fotos para 4K UHD 16:9 (PIL)")
@@ -905,13 +988,14 @@ def main():
         print("  [R] Organizar/Renomear Fotos de Origem por EXIF (%Y-%m-%d_%H-%M-%S)")
         print("  [O] Definir/Alterar Pasta de Origem (Fotos)")
         print(f"  [C] Alterar Modo de Corte (Atual: {crop_short})")
-        print(f"  [F] Alterar FPS Rapidamente (FPS Atual: {config['fps']} fps)")
+        print(f"  [F] Alterar FPS Rapidamente (FPS Atual: {fps} fps)")
+        print(f"  [P] Alterar Frames por Imagem (Atual: {fpi} frame(s)/foto | {dur_photo:.2f}s/foto)")
         print("  [5] Menu de Configurações Avançadas (CRF, Resolução, Presets, etc.)")
         print("  [6] Gerenciador de Limpeza de Arquivos")
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-6, R, O, C ou F]: ").strip().lower()
+        choice = input("Selecione uma opção [0-6, R, O, C, F ou P]: ").strip().lower()
         
         if choice == "1":
             run_step_1_crop(config)
@@ -937,6 +1021,9 @@ def main():
         elif choice == "f":
             quick_change_fps(config)
             input("\nPressione Enter para continuar...")
+        elif choice == "p":
+            quick_change_fpi(config)
+            input("\nPressione Enter para continuar...")
         elif choice == "5":
             edit_settings(config)
         elif choice == "6":
@@ -945,9 +1032,10 @@ def main():
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Digite um número de 0 a 6, R, O, C ou F.")
+            print("\n[-] Opção inválida. Digite um número de 0 a 6, R, O, C, F ou P.")
             time.sleep(1)
 
 if __name__ == "__main__":
     main()
+
 
