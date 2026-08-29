@@ -41,7 +41,8 @@ DEFAULT_CONFIG = {
     "output_dir": "fotos_cortadas_4k",
     "output_video": "timelapse_4k_cortado.mp4",
     "test_sample_size": 120,
-    "test_output_video": "timelapse_teste_4k.mp4"
+    "test_output_video": "timelapse_teste_4k.mp4",
+    "auto_clean_crops": True
 }
 
 def load_config(config_path=CONFIG_FILE):
@@ -71,7 +72,8 @@ def save_config(config, config_path=CONFIG_FILE):
         keys_to_save = [
             "source_dir", "output_dir", "fps", "frames_per_image", 
             "crop_mode", "crf", "preset", "target_width", 
-            "target_height", "test_sample_size", "output_video", "test_output_video"
+            "target_height", "test_sample_size", "output_video", "test_output_video",
+            "auto_clean_crops"
         ]
         save_dict = {k: config[k] for k in keys_to_save if k in config}
         with open(config_path, "w", encoding="utf-8") as f:
@@ -189,6 +191,9 @@ def print_banner(config=None):
         fpi = config.get("frames_per_image", 1)
         dur_per_photo = fpi / fps if fps > 0 else 0
             
+        auto_clean = config.get("auto_clean_crops", True)
+        clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada"
+            
         print(" CONFIGURAÇÕES ATUAIS:")
         print(f"   • Pasta de Origem (Fotos): {source_display}")
         print(f"   • Pasta de Cortes (4K)   : {output_dir_display}")
@@ -198,6 +203,7 @@ def print_banner(config=None):
         print(f"   • Qualidade (CRF)         : {config['crf']} (Menor = melhor qualidade)")
         print(f"   • Resolução Alvo          : {config['target_width']}x{config['target_height']} (4K UHD)")
         print(f"   • Amostra Modo Teste      : {config['test_sample_size']} fotos")
+        print(f"   • Limpeza Pós-Vídeo       : {clean_status}")
         print("=" * 66)
 
 def print_progress_bar(current, total, start_time, prefix="Progresso"):
@@ -878,55 +884,100 @@ def run_test_mode(config):
     if success:
         run_step_2_video(config, is_test=True)
 
+def run_step_4_clean_crops(config, non_interactive=False):
+    """
+    Etapa 4: Remove as fotos cortadas intermediárias (fotos_cortadas_4k)
+    para liberar espaço em disco após a renderização do vídeo.
+    """
+    output_dir = get_output_dir(config)
+    if not os.path.exists(output_dir):
+        if not non_interactive:
+            print("\n[!] A pasta de fotos cortadas já não existe ou já foi limpa.")
+        return True
+        
+    photos = glob.glob(os.path.join(output_dir, "*.jpg"))
+    total_files = len(photos)
+    size_mb = sum(os.path.getsize(f) for f in photos) / (1024 * 1024) if photos else 0
+    
+    print("\n" + "=" * 66)
+    print("      ETAPA 4: LIMPEZA DE FOTOS CORTADAS INTERMEDIÁRIAS")
+    print("=" * 66)
+    print(f"[+] Pasta de fotos cortadas: {output_dir}")
+    print(f"[+] Total de arquivos temporários: {total_files} ({size_mb:.2f} MB)")
+    print("-" * 66)
+    
+    if not non_interactive:
+        confirm = input(f"Tem certeza que deseja apagar a pasta '{output_dir}'? (s/N): ").strip().lower()
+        if confirm != 's':
+            print("[+] Limpeza cancelada pelo usuário. Arquivos mantidos.")
+            return False
+            
+    try:
+        import shutil
+        shutil.rmtree(output_dir)
+        print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({size_mb:.2f} MB liberados).")
+        print("=" * 66)
+        return True
+    except Exception as e:
+        print(f"[-] Erro ao remover a pasta '{output_dir}': {e}")
+        return False
+
 def run_full_pipeline(config):
-    """Executa o fluxo completo (Etapa 1 + Etapa 2 sequencialmente)."""
+    """
+    Executa o fluxo completo de 4 etapas:
+    Etapa 1: Organizar/Renomear fotos de origem por EXIF
+    Etapa 2: Cortar e redimensionar fotos para 4K UHD 16:9
+    Etapa 3: Gerar vídeo timelapse 4K
+    Etapa 4: Limpar fotos cortadas intermediárias (se auto_clean_crops estiver ativo)
+    """
     crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
     dur_photo = fpi / fps if fps > 0 else 0
-    print("\n[!] INICIANDO FLUXO COMPLETO (ETAPA 1 + ETAPA 2)")
-    print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
+    auto_clean = config.get("auto_clean_crops", True)
     
-    success, _ = run_step_1_crop(config)
-    if success:
-        run_step_2_video(config, is_test=False)
+    print("\n" + "=" * 66)
+    print("        INICIANDO FLUXO COMPLETO (ETAPAS 1 ➔ 2 ➔ 3 ➔ 4)")
+    print("=" * 66)
+    print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
+    print(f"    Limpeza automática pós-vídeo: {'Ativada' if auto_clean else 'Desativada'}")
+    print("-" * 66)
+    
+    # Etapa 1: Renomear fotos de origem por EXIF
+    print("\n>>> [1/4] ETAPA 1: Organizando e Renomeando Fotos de Origem por EXIF...")
+    rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True)
+    
+    # Etapa 2: Cortar e Redimensionar Fotos para 4K
+    print("\n>>> [2/4] ETAPA 2: Cortando e Redimensionando Fotos para 4K UHD...")
+    crop_ok, _ = run_step_1_crop(config)
+    if not crop_ok:
+        print("\n[-] Interrompendo pipeline: falha na Etapa 2 (Corte).")
+        return
+        
+    # Etapa 3: Renderizar Vídeo Timelapse 4K
+    print("\n>>> [3/4] ETAPA 3: Renderizando Vídeo Timelapse 4K...")
+    video_ok, _ = run_step_2_video(config, is_test=False)
+    if not video_ok:
+        print("\n[-] Interrompendo pipeline: falha na Etapa 3 (Renderização de Vídeo).")
+        return
+        
+    # Etapa 4: Limpeza das fotos cortadas intermediárias
+    if auto_clean:
+        print("\n>>> [4/4] ETAPA 4: Limpando Fotos Cortadas Intermediárias...")
+        run_step_4_clean_crops(config, non_interactive=True)
+    else:
+        print("\n[i] Etapa 4 ignorada (auto_clean_crops desativado nas configurações).")
+        
+    print("\n" + "=" * 66)
+    print("       🎉 FLUXO COMPLETO FINALIZADO COM SUCESSO!")
+    print("=" * 66)
 
 def clean_manager(config):
-    """Menu utilitário para limpeza de fotos cortadas e arquivos temporários."""
-    output_dir = get_output_dir(config)
-    
-    while True:
-        print("\n" + "="*66)
-        print("             GERENCIADOR DE LIMPEZA E ARQUIVOS")
-        print("="*66)
-        
-        has_cropped = os.path.exists(output_dir)
-        cropped_count = len(glob.glob(os.path.join(output_dir, "*.jpg"))) if has_cropped else 0
-        cropped_size_mb = 0
-        if has_cropped:
-            for f in glob.glob(os.path.join(output_dir, "*.jpg")):
-                cropped_size_mb += os.path.getsize(f) / (1024 * 1024)
-                
-        print(f"[1] Fotos cortadas em '{output_dir}': {cropped_count} arquivos ({cropped_size_mb:.2f} MB)")
-        print("[2] Apagar a pasta de fotos cortadas")
-        print("[0] Voltar ao Menu Principal")
-        print("-" * 66)
-        
-        choice = input("Escolha uma opção: ").strip()
-        if choice == "2":
-            if has_cropped:
-                confirm = input(f"Tem certeza que deseja apagar a pasta '{output_dir}'? (s/N): ").strip().lower()
-                if confirm == 's':
-                    import shutil
-                    shutil.rmtree(output_dir)
-                    print(f"[+] Pasta '{output_dir}' removida com sucesso!")
-            else:
-                print("[!] A pasta de fotos cortadas já não existe.")
-        elif choice == "0":
-            break
+    """Atalho utilitário para limpeza."""
+    return run_step_4_clean_crops(config, non_interactive=False)
 
 def edit_settings(config, config_path=CONFIG_FILE):
-    """Menu para alteração interativa de parâmetros de configuração e persistência em JSON."""
+    """Tela 2: Menu para alteração interativa de parâmetros de configuração e persistência em JSON."""
     while True:
         crop_label = CROP_MODE_LABELS.get(config.get("crop_mode", "center"), config.get("crop_mode", "center"))
         source_dir = config.get("source_dir", ".")
@@ -937,25 +988,29 @@ def edit_settings(config, config_path=CONFIG_FILE):
         fps = config.get("fps", 60)
         fpi = config.get("frames_per_image", 1)
         dur_photo = fpi / fps if fps > 0 else 0
+        auto_clean = config.get("auto_clean_crops", True)
+        clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada (Mantém fotos cortadas)"
             
         print("\n" + "="*66)
         print("               CONFIGURAÇÕES DO TIMELAPSE STUDIO")
         print("="*66)
-        print(f"[1] Pasta de Origem (Fotos) : {source_display}")
-        print(f"    ↳ Pasta de Cortes (4K)  : {output_dir_display}")
-        print(f"[2] Taxa de Quadros (FPS)   : {fps} fps")
-        print(f"[3] Frames por Imagem (FPI) : {fpi} frame(s)/foto ({dur_photo:.2f}s por foto)")
-        print(f"[4] Modo de Corte (Crop)     : {crop_label}")
-        print(f"[5] Qualidade FFmpeg (CRF)   : {config['crf']}")
-        print(f"[6] Resolução de saída       : {config['target_width']}x{config['target_height']}")
-        print(f"[7] Amostragem Modo Teste    : {config['test_sample_size']} fotos")
-        print(f"[8] Preset FFmpeg            : {config['preset']}")
+        print(f"[1] Pasta de Origem (Fotos)      : {source_display}")
+        print(f"    ↳ Pasta de Cortes (4K)       : {output_dir_display}")
+        print(f"[2] Taxa de Quadros (FPS)        : {fps} fps")
+        print(f"[3] Frames por Imagem (FPI)      : {fpi} frame(s)/foto ({dur_photo:.2f}s por foto)")
+        print(f"[4] Modo de Corte (Crop 16:9)    : {crop_label}")
+        print(f"[5] Qualidade FFmpeg (CRF)       : {config['crf']} (Menor = melhor qualidade)")
+        print(f"[6] Resolução de saída           : {config['target_width']}x{config['target_height']} (4K UHD)")
+        print(f"[7] Amostragem Modo Teste        : {config['test_sample_size']} fotos")
+        print(f"[8] Preset FFmpeg                : {config['preset']}")
+        print(f"[9] Limpeza Automática Pós-Vídeo : {clean_status}")
+        print("-" * 66)
         print(f"[S] Salvar Configurações Atuais no '{config_path}'")
         print("[D] Restaurar Configurações Padrão de Fábrica (Reset)")
         print("[0] Voltar ao Menu Principal")
-        print("-" * 66)
+        print("=" * 66)
         
-        choice = input("Escolha uma opção para alterar [0-8, S ou D]: ").strip().lower()
+        choice = input("Escolha uma opção [0-9, S ou D]: ").strip().lower()
         if choice == "1":
             select_source_dir(config)
         elif choice == "2":
@@ -982,6 +1037,10 @@ def edit_settings(config, config_path=CONFIG_FILE):
             val = input(f"Novo Preset (ultrafast/medium/slow) [{config['preset']}]: ").strip()
             if val in ["ultrafast", "medium", "slow"]:
                 config["preset"] = val
+        elif choice == "9":
+            config["auto_clean_crops"] = not config.get("auto_clean_crops", True)
+            print(f"\n[+] Limpeza automática pós-renderização: {'Ativada' if config['auto_clean_crops'] else 'Desativada'}.")
+            time.sleep(1.0)
         elif choice == "s":
             if save_config(config, config_path):
                 print(f"\n[+] Configurações salvas em '{config_path}' com sucesso!")
@@ -1057,7 +1116,7 @@ def parse_arguments():
     parser.add_argument(
         "--run-all",
         action="store_true",
-        help="Executa o pipeline completo (Etapa 1 + Etapa 2) e encerra sem abrir o menu interativo."
+        help="Executa o pipeline completo (Etapas 1 ➔ 2 ➔ 3 ➔ 4) e encerra sem abrir o menu interativo."
     )
     parser.add_argument(
         "--test",
@@ -1115,66 +1174,48 @@ def main():
             run_step_2_video(config, is_test=True)
         return
 
-    # Modo interativo CLI
+    # Modo interativo CLI (Tela 1: Menu Principal)
     while True:
-        crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
-        fps = config.get("fps", 60)
-        fpi = config.get("frames_per_image", 1)
-        dur_photo = fpi / fps if fps > 0 else 0
         print_banner(config)
         print("MENU PRINCIPAL:")
-        print("  [1] Etapa 1: Cortar e Redimensionar Fotos para 4K UHD 16:9 (PIL)")
-        print("  [2] Etapa 2: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
-        print("  [3] Modo Teste Rápido (Amostra de 120 fotos)")
-        print("  [4] Executar Fluxo Completo (Etapa 1 + Etapa 2 Sequencialmente)")
-        print("  [R] Organizar/Renomear Fotos de Origem por EXIF (%Y-%m-%d_%H-%M-%S)")
-        print("  [O] Definir/Alterar Pasta de Origem (Fotos)")
-        print(f"  [C] Alterar Modo de Corte (Atual: {crop_short})")
-        print(f"  [F] Alterar FPS Rapidamente (FPS Atual: {fps} fps)")
-        print(f"  [P] Alterar Frames por Imagem (Atual: {fpi} frame(s)/foto | {dur_photo:.2f}s/foto)")
-        print("  [5] Menu de Configurações Avançadas & Persistência (CRF, Preset, JSON)")
-        print("  [6] Gerenciador de Limpeza de Arquivos")
+        print("  [ENTER] ou [6] 🚀 EXECUTAR FLUXO COMPLETO (Etapas 1 ➔ 2 ➔ 3 ➔ 4)")
+        print("  " + "-" * 58)
+        print("  [1] Etapa 1: Organizar e Renomear Fotos de Origem por EXIF")
+        print("  [2] Etapa 2: Cortar e Redimensionar Fotos para 4K UHD 16:9 (PIL)")
+        print("  [3] Etapa 3: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
+        print("  [4] Etapa 4: Limpar / Apagar Fotos Cortadas Intermediárias")
+        print("  [5] Modo Teste Rápido (Amostra reduzida de 120 fotos)")
+        print("  [7] ⚙️  Menu de Configurações (Pasta, FPS, Frames/Foto, Corte, CRF, etc.)")
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-6, R, O, C, F ou P]: ").strip().lower()
+        choice = input("Selecione uma opção [0-5, 7 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
         
-        if choice == "1":
-            run_step_1_crop(config)
-            input("\nPressione Enter para continuar...")
-        elif choice == "2":
-            run_step_2_video(config)
-            input("\nPressione Enter para continuar...")
-        elif choice == "3":
-            run_test_mode(config)
-            input("\nPressione Enter para continuar...")
-        elif choice == "4":
+        if choice in ["", "6"]:
             run_full_pipeline(config)
             input("\nPressione Enter para continuar...")
-        elif choice == "r":
+        elif choice == "1":
             rename_source_photos(config["source_dir"], config["output_dir"])
             input("\nPressione Enter para continuar...")
-        elif choice in ["o", "d"]:
-            select_source_dir(config)
+        elif choice == "2":
+            run_step_1_crop(config)
             input("\nPressione Enter para continuar...")
-        elif choice == "c":
-            quick_change_crop(config)
+        elif choice == "3":
+            run_step_2_video(config)
             input("\nPressione Enter para continuar...")
-        elif choice == "f":
-            quick_change_fps(config)
-            input("\nPressione Enter para continuar...")
-        elif choice == "p":
-            quick_change_fpi(config)
+        elif choice == "4":
+            run_step_4_clean_crops(config, non_interactive=False)
             input("\nPressione Enter para continuar...")
         elif choice == "5":
+            run_test_mode(config)
+            input("\nPressione Enter para continuar...")
+        elif choice == "7":
             edit_settings(config, config_file)
-        elif choice == "6":
-            clean_manager(config)
         elif choice == "0":
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Digite um número de 0 a 6, R, O, C, F ou P.")
+            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-5, 7].")
             time.sleep(1)
 
 if __name__ == "__main__":

@@ -8,5 +8,6 @@
   "preset": "ultrafast",
   "target_width": 3840,
   "target_height": 2160,
-  "test_sample_size": 120
+  "test_sample_size": 120,
+  "auto_clean_crops": true
 }
