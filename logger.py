@@ -21,7 +21,17 @@ def ensure_logs_dir():
     return LOGS_DIR
 
 def extract_exif_datetime(img_path):
-    """Extrai a data/hora original da foto via cabeçalhos EXIF."""
+    """
+    Extrai a data/hora original da foto.
+    Otimização: Se o nome do arquivo já começar com YYYY-MM-DD_HH-MM-SS_, lê em 0.0001s sem abrir imagem.
+    """
+    base_name = os.path.basename(img_path)
+    if len(base_name) >= 19 and base_name[4] == '-' and base_name[7] == '-' and base_name[10] == '_' and base_name[13] == '-' and base_name[16] == '-':
+        try:
+            return datetime.datetime.strptime(base_name[:19], '%Y-%m-%d_%H-%M-%S')
+        except ValueError:
+            pass
+
     try:
         with Image.open(img_path) as img:
             exif = img._getexif()

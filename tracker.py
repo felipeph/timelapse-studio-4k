@@ -81,6 +81,17 @@ def update_stage_status(project_id, stage_key, status, details=None, extra_data=
     status_data["stages"][stage_key] = stage_info
     save_project_status(project_id, status_data)
 
+def is_stage_completed(project_id, stage_key):
+    """Verifica se uma etapa específica já foi marcada como 'completed' no status.json."""
+    status_data = load_project_status(project_id)
+    stages = status_data.get("stages", {})
+    return stages.get(stage_key, {}).get("status") == "completed"
+
+def get_stage_info(project_id, stage_key):
+    """Retorna os dados registrados para uma etapa específica."""
+    status_data = load_project_status(project_id)
+    return status_data.get("stages", {}).get(stage_key, {})
+
 def get_completed_stages_summary(project_id):
     """
     Retorna uma string resumida das etapas já concluídas para exibição no banner.

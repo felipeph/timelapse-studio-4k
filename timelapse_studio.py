@@ -267,8 +267,29 @@ def print_progress_bar(current, total, start_time, prefix="Progresso", current_i
     )
     sys.stdout.flush()
 
+def is_already_formatted_name(filename_or_path):
+    """Verifica se o nome do arquivo já segue o padrão YYYY-MM-DD_HH-MM-SS_..."""
+    base_name = os.path.basename(filename_or_path)
+    name_no_ext, _ = os.path.splitext(base_name)
+    if len(name_no_ext) >= 20:
+        if (name_no_ext[0:4].isdigit() and name_no_ext[4] == '-' and
+            name_no_ext[5:7].isdigit() and name_no_ext[7] == '-' and
+            name_no_ext[8:10].isdigit() and name_no_ext[10] == '_' and
+            name_no_ext[11:13].isdigit() and name_no_ext[13] == '-' and
+            name_no_ext[14:16].isdigit() and name_no_ext[16] == '-' and
+            name_no_ext[17:19].isdigit() and name_no_ext[19] == '_'):
+            return True
+    return False
+
 def get_exif_datetime(img_path):
     """Extrai a data/hora original da foto via cabeçalhos EXIF como objeto datetime."""
+    base_name = os.path.basename(img_path)
+    if is_already_formatted_name(base_name):
+        try:
+            return datetime.datetime.strptime(base_name[:19], '%Y-%m-%d_%H-%M-%S')
+        except ValueError:
+            pass
+
     try:
         with Image.open(img_path) as img:
             exif = img._getexif()
@@ -301,18 +322,16 @@ def get_exif_timestamp(img_path):
 def format_photo_name(img_path, dt=None):
     """
     Gera o nome da foto no formato: %Y-%m-%d_%H-%M-%S_<nome_original>.jpg
-    Se o arquivo já possuir o prefixo no padrão esperado, mantém para evitar duplicações.
+    Se o arquivo já possuir o prefixo no padrão esperado, mantém imediatamente sem retrabalho.
     """
+    base_name = os.path.basename(img_path)
+    if is_already_formatted_name(base_name):
+        return base_name
+        
     if dt is None:
         dt = get_exif_datetime(img_path)
     ts_prefix = dt.strftime('%Y-%m-%d_%H-%M-%S')
-    base_name = os.path.basename(img_path)
     name_no_ext, ext = os.path.splitext(base_name)
-    
-    # Verifica se já começa com o padrão YYYY-MM-DD_HH-MM-SS_
-    if len(name_no_ext) >= 20 and name_no_ext[4] == '-' and name_no_ext[7] == '-' and name_no_ext[10] == '_' and name_no_ext[13] == '-' and name_no_ext[16] == '-':
-        return f"{name_no_ext}{ext.lower()}"
-        
     return f"{ts_prefix}_{name_no_ext}{ext.lower()}"
 
 def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
@@ -435,23 +454,35 @@ def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_in
     print("[+] Formato alvo: %Y-%m-%d_%H-%M-%S_<nome_original>.jpg")
     print("-" * 66)
     
+    # Verificação rápida se todas as fotos já estão renomeadas (evita retrabalho)
+    photos_to_rename = [p for p in photos if not is_already_formatted_name(p)]
+    if not photos_to_rename:
+        print(f"\n[i] Todas as {len(photos)} fotos já estão no formato padrão por EXIF.")
+        print("[+] Nenhuma renomeação necessária. Pulando Etapa 1 (sem retrabalho).")
+        print("=" * 66)
+        tracker.update_stage_status(project_id, "etapa_1", "completed", details=f"Todas as {len(photos)} fotos já estavam padronizadas")
+        logger.log_event(project_id, "etapa_1_rename", f"Todas as {len(photos)} fotos já estavam renomeadas.")
+        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026") if config else "timelapse-studio-2026"
+        notifier.notify_stage_completion(project_id, 1, "Organização e Renomeação EXIF", details=f"Todas as {len(photos)} fotos já estavam organizadas", ntfy_topic=ntfy_topic)
+        return 0
+
     if not non_interactive:
-        confirm = input("Deseja prosseguir com a renomeação dos arquivos de origem? (s/N): ").strip().lower()
+        confirm = input(f"Localizadas {len(photos_to_rename)} fotos para renomear. Prosseguir? (s/N): ").strip().lower()
         if confirm != 's':
             print("[+] Operação cancelada pelo usuário.")
             return 0
             
     tracker.update_stage_status(project_id, "etapa_1", "in_progress")
     renamed_count = 0
-    kept_count = 0
+    kept_count = len(photos) - len(photos_to_rename)
     errors = 0
-    total = len(photos)
+    total = len(photos_to_rename)
     start_time = time.time()
     
     # Processamento concorrente para agilizar operações em milhares de fotos
     max_workers = min(32, (os.cpu_count() or 4) * 4)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_single_rename, p) for p in photos]
+        futures = [executor.submit(process_single_rename, p) for p in photos_to_rename]
         for idx, future in enumerate(concurrent.futures.as_completed(futures), 1):
             success, old_name, new_name, reason = future.result()
             if success:
@@ -488,18 +519,21 @@ def process_single_image(task):
     Worker executado em paralelo para cortar 16:9 (centralizado, por baixo ou por cima)
     e redimensionar/ajustar para a resolução alvo (ex: 3840x2160 4K),
     preservando os metadados EXIF e o nome base com o sufixo _crop4k.jpg.
-    task = (img_path, output_dir, target_w, target_h, seq_idx, crop_mode)
+    Retorna (sucesso: bool, out_path_ou_erro: str, is_reused: bool).
     """
     img_path, output_dir, target_w, target_h, seq_idx, crop_mode = task
     try:
-        dt = get_exif_datetime(img_path)
-        formatted_name = format_photo_name(img_path, dt=dt)
+        formatted_name = format_photo_name(img_path)
         name_no_ext, _ = os.path.splitext(formatted_name)
         
         # Nome do arquivo final: %Y-%m-%d_%H-%M-%S_nomeoriginal_crop4k.jpg
         out_filename = f"{name_no_ext}_crop4k.jpg"
         out_path = os.path.join(output_dir, out_filename)
         
+        # Evitar retrabalho: se a foto cortada já existe com tamanho válido (> 1KB), reaproveita sem processar!
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
+            return True, out_path, True
+            
         with Image.open(img_path) as img:
             raw_exif = img.info.get("exif")
             w, h = img.size
@@ -552,9 +586,9 @@ def process_single_image(task):
                 
             resized.save(out_path, "JPEG", **save_kwargs)
             
-        return True, out_path
+        return True, out_path, False
     except Exception as e:
-        return False, f"Erro em {os.path.basename(img_path)}: {str(e)}"
+        return False, f"Erro em {os.path.basename(img_path)}: {str(e)}", False
 
 def run_step_1_crop(config, max_photos=None):
     """Etapa 1: Cortar e redimensionar fotos em paralelo via PIL preservando metadados EXIF."""
@@ -603,31 +637,45 @@ def run_step_1_crop(config, max_photos=None):
 
     start_time = time.time()
     completed = 0
+    new_count = 0
+    reused_count = 0
     errors = 0
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [executor.submit(process_single_image, t) for t in tasks]
         for future in concurrent.futures.as_completed(futures):
             completed += 1
-            success, res = future.result()
+            success, res, is_reused = future.result()
             if success:
                 item_name = os.path.basename(res)
-                logger.log_event(project_id, "etapa_2_crop", f"Cortado 4K: {item_name}", to_general=False)
+                if is_reused:
+                    reused_count += 1
+                    item_display = f"{item_name} (Reaproveitado)"
+                else:
+                    new_count += 1
+                    item_display = f"{item_name}"
+                    logger.log_event(project_id, "etapa_2_crop", f"Cortado 4K: {item_name}", to_general=False)
             else:
                 errors += 1
-                item_name = f"Erro: {res}"
+                item_display = f"Erro: {res}"
                 logger.log_event(project_id, "etapa_2_crop", res, level="WARN", to_general=False)
-            print_progress_bar(completed, total, start_time, prefix="Processando fotos", current_item=item_name)
+            print_progress_bar(completed, total, start_time, prefix="Processando fotos", current_item=item_display)
 
     print() # Pular linha
     total_time = time.time() - start_time
     print("-" * 66)
     if errors == 0:
-        print(f"[+] Sucesso! {completed} fotos processadas em {total_time:.1f} segundos ({completed/total_time:.1f} fotos/s).")
-        tracker.update_stage_status(project_id, "etapa_2", "completed", details=f"{completed} fotos cortadas em {total_time:.1f}s ({completed/total_time:.1f} fotos/s)")
-        logger.log_event(project_id, "etapa_2_crop", f"{completed} fotos cortadas 4K com sucesso em {total_time:.1f}s.")
+        if reused_count == total:
+            print(f"[+] Sucesso! Todas as {total} fotos já estavam cortadas em 4K e foram reaproveitadas em {total_time:.1f}s.")
+            details_str = f"Todas as {total} fotos reaproveitadas (já cortadas)"
+        else:
+            print(f"[+] Sucesso! {total} fotos prontas ({new_count} novas processadas, {reused_count} reaproveitadas) em {total_time:.1f}s.")
+            details_str = f"{new_count} fotos cortadas, {reused_count} reaproveitadas em {total_time:.1f}s"
+            
+        tracker.update_stage_status(project_id, "etapa_2", "completed", details=details_str)
+        logger.log_event(project_id, "etapa_2_crop", f"{total} fotos prontas 4K ({new_count} novas, {reused_count} reaproveitadas) em {total_time:.1f}s.")
         ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
-        notifier.notify_stage_completion(project_id, 2, "Corte e Redimensionamento 4K", details=f"{completed} fotos processadas em {total_time:.1f}s ({completed/total_time:.1f} fotos/s)", ntfy_topic=ntfy_topic)
+        notifier.notify_stage_completion(project_id, 2, "Corte e Redimensionamento 4K", details=details_str, ntfy_topic=ntfy_topic)
     else:
         print(f"[!] Concluído com {errors} erros de {completed} fotos processadas.")
         tracker.update_stage_status(project_id, "etapa_2", "failed", details=f"{errors} erros de {completed} fotos processadas")
@@ -832,6 +880,19 @@ def run_step_2_video(config, is_test=False):
 
     video_name, first_dt, last_dt, range_str = generate_video_info(cropped_photos, is_test=is_test)
     output_path = os.path.abspath(os.path.join(source_dir, video_name))
+
+    # Evitar retrabalho: se o vídeo já existe com tamanho válido e já foi concluído
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024:
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        if tracker.is_stage_completed(project_id, "etapa_3"):
+            print("\n" + "=" * 66)
+            print("        ETAPA 3: GERAR VÍDEO TIMELAPSE 4K (FFMPEG)")
+            print("=" * 66)
+            print(f"[i] O vídeo '{video_name}' ({size_mb:.2f} MB) já existe no destino.")
+            print("[+] Reaproveitando vídeo já renderizado (sem retrabalho).")
+            print(f"[+] Arquivo: {output_path}")
+            print("=" * 66)
+            return True, output_path
 
     tracker.update_stage_status(project_id, "etapa_3", "in_progress")
     # Primeira tentativa (utiliza GPU se disponível)
@@ -1069,6 +1130,19 @@ def run_step_5_youtube_upload(config, video_path=None, project_id=None):
     if not project_id:
         project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
         
+    # Evitar retrabalho: se o vídeo deste projeto já foi enviado para o YouTube
+    existing_stage5 = tracker.get_stage_info(project_id, "etapa_5")
+    if existing_stage5.get("status") == "completed" and existing_stage5.get("youtube_url"):
+        existing_url = existing_stage5["youtube_url"]
+        print("\n" + "=" * 66)
+        print("          ETAPA 5: PUBLICAÇÃO DE VÍDEO NO YOUTUBE")
+        print("=" * 66)
+        print(f"[i] O vídeo deste projeto já foi publicado anteriormente no YouTube:")
+        print(f"    🔗 {existing_url}")
+        print("[+] Upload ignorado para evitar envio de vídeos duplicados no canal.")
+        print("=" * 66)
+        return True, existing_url
+
     if not video_path:
         video_files = glob.glob(os.path.join(source_dir, "*.mp4"))
         if not video_files:
