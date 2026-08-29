@@ -19,11 +19,14 @@ import os
 import sys
 import glob
 import time
+import json
 import argparse
 import datetime
 import subprocess
 import concurrent.futures
 from PIL import Image, ExifTags
+
+CONFIG_FILE = "config.json"
 
 # Configurações Padrão
 DEFAULT_CONFIG = {
@@ -40,6 +43,108 @@ DEFAULT_CONFIG = {
     "test_sample_size": 120,
     "test_output_video": "timelapse_teste_4k.mp4"
 }
+
+def load_config(config_path=CONFIG_FILE):
+    """
+    Carrega as configurações a partir do arquivo JSON.
+    Mescla com DEFAULT_CONFIG para garantir que todas as chaves existam.
+    Retorna (config_dict, bool_existia).
+    """
+    config = DEFAULT_CONFIG.copy()
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                saved_config = json.load(f)
+            if isinstance(saved_config, dict):
+                config.update(saved_config)
+                return config, True
+        except Exception as e:
+            print(f"[!] Erro ao ler '{config_path}': {e}. Usando valores padrão.")
+            return config, False
+    return config, False
+
+def save_config(config, config_path=CONFIG_FILE):
+    """
+    Salva o dicionário de configurações em formato JSON indentado.
+    """
+    try:
+        keys_to_save = [
+            "source_dir", "output_dir", "fps", "frames_per_image", 
+            "crop_mode", "crf", "preset", "target_width", 
+            "target_height", "test_sample_size", "output_video", "test_output_video"
+        ]
+        save_dict = {k: config[k] for k in keys_to_save if k in config}
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(save_dict, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"[!] Erro ao salvar configurações em '{config_path}': {e}")
+        return False
+
+def interactive_initial_setup_wizard(config_path=CONFIG_FILE):
+    """
+    Assistente de primeira execução para criar o arquivo config.json
+    quando ele não existir.
+    """
+    print("\n" + "=" * 66)
+    print("      BEM-VINDO AO TIMELAPSE STUDIO 4K UHD - CONFIGURAÇÃO INICIAL")
+    print("=" * 66)
+    print(f" Arquivo de configuração '{config_path}' não encontrado.")
+    print(" Vamos definir as preferências padrão para seus projetos!")
+    print(" Dica: Pressione [ENTER] em qualquer campo para aceitar o valor padrão.")
+    print("-" * 66)
+    
+    config = DEFAULT_CONFIG.copy()
+    
+    # 1. Pasta de origem
+    src_input = input(f"\n1. Pasta de Origem das Fotos [{config['source_dir']}]: ").strip()
+    if src_input:
+        sanitized = sanitize_path(src_input)
+        if sanitized:
+            config["source_dir"] = sanitized
+            
+    # 2. FPS
+    fps_input = input(f"2. Taxa de Quadros por Segundo (FPS) [{config['fps']}]: ").strip()
+    if fps_input.isdigit() and int(fps_input) > 0:
+        config["fps"] = int(fps_input)
+        
+    # 3. Frames por Imagem (FPI)
+    fpi_input = input(f"3. Frames por Foto (FPI - ex: 1 = rápido, 60 = 1s/foto a 60fps) [{config['frames_per_image']}]: ").strip()
+    if fpi_input.isdigit() and int(fpi_input) > 0:
+        config["frames_per_image"] = int(fpi_input)
+        
+    # 4. Modo de corte (Crop)
+    print("4. Modo de Enquadramento 16:9 vertical:")
+    print("   [1] Centro (Corta topo e base igualmente - Padrão)")
+    print("   [2] Topo (Preserva topo, apaga base)")
+    print("   [3] Base (Preserva base, apaga topo)")
+    crop_choice = input(f"   Escolha [1/2/3 ou Enter para Centro]: ").strip()
+    if crop_choice == "2":
+        config["crop_mode"] = "top"
+    elif crop_choice == "3":
+        config["crop_mode"] = "bottom"
+    else:
+        config["crop_mode"] = "center"
+        
+    # 5. CRF
+    crf_input = input(f"5. Fator de Qualidade CRF (Menor = melhor qualidade, padrão: 15) [{config['crf']}]: ").strip()
+    if crf_input.isdigit():
+        config["crf"] = int(crf_input)
+        
+    # 6. Preset
+    preset_input = input(f"6. Preset FFmpeg (ultrafast / medium / slow) [{config['preset']}]: ").strip().lower()
+    if preset_input in ["ultrafast", "medium", "slow"]:
+        config["preset"] = preset_input
+
+    # Salva
+    if save_config(config, config_path):
+        print(f"\n[+] Configurações iniciais salvas com sucesso em '{config_path}'!")
+    else:
+        print(f"\n[!] Aviso: Não foi possível gravar '{config_path}'. Usando configurações em memória.")
+        
+    print("=" * 66)
+    time.sleep(1.5)
+    return config
 
 CROP_MODE_LABELS = {
     "center": "Centro (Corta topo e base igualmente)",
@@ -820,8 +925,8 @@ def clean_manager(config):
         elif choice == "0":
             break
 
-def edit_settings(config):
-    """Menu para alteração interativa de parâmetros de configuração."""
+def edit_settings(config, config_path=CONFIG_FILE):
+    """Menu para alteração interativa de parâmetros de configuração e persistência em JSON."""
     while True:
         crop_label = CROP_MODE_LABELS.get(config.get("crop_mode", "center"), config.get("crop_mode", "center"))
         source_dir = config.get("source_dir", ".")
@@ -845,10 +950,12 @@ def edit_settings(config):
         print(f"[6] Resolução de saída       : {config['target_width']}x{config['target_height']}")
         print(f"[7] Amostragem Modo Teste    : {config['test_sample_size']} fotos")
         print(f"[8] Preset FFmpeg            : {config['preset']}")
-        print("[0] Salvar e Voltar ao Menu Principal")
+        print(f"[S] Salvar Configurações Atuais no '{config_path}'")
+        print("[D] Restaurar Configurações Padrão de Fábrica (Reset)")
+        print("[0] Voltar ao Menu Principal")
         print("-" * 66)
         
-        choice = input("Escolha uma opção para alterar (ou 0 para sair): ").strip()
+        choice = input("Escolha uma opção para alterar [0-8, S ou D]: ").strip().lower()
         if choice == "1":
             select_source_dir(config)
         elif choice == "2":
@@ -875,6 +982,18 @@ def edit_settings(config):
             val = input(f"Novo Preset (ultrafast/medium/slow) [{config['preset']}]: ").strip()
             if val in ["ultrafast", "medium", "slow"]:
                 config["preset"] = val
+        elif choice == "s":
+            if save_config(config, config_path):
+                print(f"\n[+] Configurações salvas em '{config_path}' com sucesso!")
+            time.sleep(1.2)
+        elif choice == "d":
+            confirm = input("Tem certeza que deseja restaurar os padrões de fábrica? (s/n): ").strip().lower()
+            if confirm in ["s", "sim", "y"]:
+                config.clear()
+                config.update(DEFAULT_CONFIG)
+                save_config(config, config_path)
+                print("\n[+] Configurações restauradas para os padrões de fábrica!")
+                time.sleep(1.2)
         elif choice == "0":
             break
 
@@ -882,6 +1001,13 @@ def parse_arguments():
     """Configura e processa os argumentos de linha de comando."""
     parser = argparse.ArgumentParser(
         description="Timelapse Studio 4K UHD - Processamento e Renderização de Timelapses Multicâmeras."
+    )
+    parser.add_argument(
+        "-c", "--config",
+        dest="config_file",
+        type=str,
+        default=CONFIG_FILE,
+        help=f"Caminho do arquivo de configuração JSON (padrão: {CONFIG_FILE})."
     )
     parser.add_argument(
         "-i", "--input", "--source",
@@ -919,6 +1045,11 @@ def parse_arguments():
         help="Fator de qualidade de compressão CRF (menor = melhor qualidade, ex: 15)."
     )
     parser.add_argument(
+        "--no-wizard",
+        action="store_true",
+        help="Não exibe o assistente interativo de primeira execução caso o arquivo JSON não exista."
+    )
+    parser.add_argument(
         "--rename-source",
         action="store_true",
         help="Renomeia todas as fotos da pasta de origem com o formato %%Y-%%m-%%d_%%H-%%M-%%S_<nome_original>.jpg e encerra."
@@ -937,14 +1068,25 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
-    config = DEFAULT_CONFIG.copy()
+    config_file = args.config_file
     
+    # Carrega config existente ou executa assistente de primeira execução
+    config, exists = load_config(config_file)
+    
+    is_direct_run = bool(args.rename_source or args.run_all or args.test)
+    if not exists and not is_direct_run and not args.no_wizard:
+        config = interactive_initial_setup_wizard(config_file)
+    elif not exists:
+        # Se for execução direta com flags, salva valores default para criar o config.json
+        save_config(config, config_file)
+    
+    # Sobrescrita pontual via argumentos CLI
     if args.source_dir:
         cleaned_source = sanitize_path(args.source_dir)
         if os.path.exists(cleaned_source) and os.path.isdir(cleaned_source):
             config["source_dir"] = cleaned_source
         else:
-            print(f"[!] Aviso: A pasta de origem informada '{args.source_dir}' não foi encontrada. Usando padrão.")
+            print(f"[!] Aviso: A pasta de origem informada '{args.source_dir}' não foi encontrada. Usando '{config.get('source_dir')}'.")
             
     if args.fps:
         config["fps"] = args.fps
@@ -990,7 +1132,7 @@ def main():
         print(f"  [C] Alterar Modo de Corte (Atual: {crop_short})")
         print(f"  [F] Alterar FPS Rapidamente (FPS Atual: {fps} fps)")
         print(f"  [P] Alterar Frames por Imagem (Atual: {fpi} frame(s)/foto | {dur_photo:.2f}s/foto)")
-        print("  [5] Menu de Configurações Avançadas (CRF, Resolução, Presets, etc.)")
+        print("  [5] Menu de Configurações Avançadas & Persistência (CRF, Preset, JSON)")
         print("  [6] Gerenciador de Limpeza de Arquivos")
         print("  [0] Sair")
         print("=" * 66)
@@ -1025,7 +1167,7 @@ def main():
             quick_change_fpi(config)
             input("\nPressione Enter para continuar...")
         elif choice == "5":
-            edit_settings(config)
+            edit_settings(config, config_file)
         elif choice == "6":
             clean_manager(config)
         elif choice == "0":

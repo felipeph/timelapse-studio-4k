@@ -6,6 +6,7 @@ Automação em Python para processamento de fotos e renderização de timelapses
 
 ## 🚀 Funcionalidades
 
+- **Configurações Persistentes em JSON (`config.json`)**: Preferências salvas automaticamente e ignoradas pelo Git. Na primeira execução sem o arquivo, um assistente interativo (wizard) ajuda o usuário a configurar seus parâmetros padrão.
 - **Multicâmeras**: Compatível com GoPro, Canon, Nikon, Sony e qualquer câmera (busca automática em subpastas `DCIM` ou na raiz).
 - **Pasta de Origem Personalizada**: Suporte para definir e alterar o diretório onde estão as fotos (com suporte a drag & drop no terminal do Windows).
 - **Saída Unificada na Origem**: A pasta de fotos cortadas (`fotos_cortadas_4k`) e os arquivos de vídeo gerados (`timelapse_*.mp4`) são salvos diretamente no mesmo local da pasta de origem das fotos.
@@ -22,6 +23,7 @@ Automação em Python para processamento de fotos e renderização de timelapses
   - Ajuste dinâmico de taxa de quadros (FPS: 24, 30, 60, etc.) (`[F]`).
   - Ajuste de frames por imagem / tempo de exibição por foto (`[P]`).
   - Configuração de modo de enquadramento (Crop) (`[C]`).
+  - Menu de Configurações Avançadas e Persistência em JSON (`[5]`).
   - Pipeline automatizado de ponta a ponta.
 
 ---
@@ -35,6 +37,33 @@ Automação em Python para processamento de fotos e renderização de timelapses
 
 ```bash
 pip install -r requirements.txt
+```
+
+---
+
+## ⚙️ Configurações & Arquivo `config.json`
+
+O Timelapse Studio suporta carregamento automático de opções através de um arquivo `config.json`.
+
+### Assistente de Primeira Execução (Wizard)
+Na primeira vez que você executar o script sem um `config.json`, ele iniciará automaticamente um assistente interativo no terminal perguntando suas preferências (pressionando `Enter` aceita o valor padrão sugerido).
+
+O arquivo gerado é mantido localmente e já está no `.gitignore` para não ser enviado ao repositório.
+
+### Modelo de Configuração (`config.example.json`):
+```json
+{
+  "source_dir": ".",
+  "output_dir": "fotos_cortadas_4k",
+  "fps": 60,
+  "frames_per_image": 1,
+  "crop_mode": "center",
+  "crf": 15,
+  "preset": "ultrafast",
+  "target_width": 3840,
+  "target_height": 2160,
+  "test_sample_size": 120
+}
 ```
 
 ---
@@ -54,6 +83,7 @@ Siga as opções do menu interativo no terminal:
 - Pressione `[O]` para definir ou alterar a pasta de origem das fotos (arrastando a pasta para a janela do terminal).
 - Pressione `[F]` para alterar a taxa de quadros (FPS) do vídeo de saída.
 - Pressione `[P]` para ajustar quantos frames cada imagem/foto vai durar no vídeo (ex: 60 frames/foto para durar 1 segundo por foto a 60 FPS).
+- Pressione `[5]` para salvar as configurações atuais no `config.json` ou restaurar padrões de fábrica.
 - Pressione `[1]` para processar os cortes 4K e `[2]` para gerar o vídeo final com metadados e nome cronológico.
 
 ### 2. Linha de Comando (Modo Direto / Automação)
@@ -61,6 +91,9 @@ Siga as opções do menu interativo no terminal:
 Você também pode passar argumentos diretamente via linha de comando:
 
 ```bash
+# Executar usando um arquivo de configuração customizado
+python timelapse_studio.py -c meu_perfil.json
+
 # Renomear fotos da pasta de origem pelo EXIF
 python timelapse_studio.py -i "D:\Fotos\GoPro_Viagem" --rename-source
 
@@ -75,11 +108,13 @@ python timelapse_studio.py -i "C:\Imagens\Timelapse" --test
 ```
 
 #### Parâmetros disponíveis:
+- `-c`, `--config`: Caminho para o arquivo JSON de configuração (padrão: `config.json`).
 - `-i`, `--input`, `--source`: Caminho da pasta onde estão as fotos JPG/JPEG.
 - `-fps`, `--fps`: Taxa de quadros por segundo (ex: 15, 24, 30, 60).
 - `-fpi`, `--fpi`, `--frames-per-image`: Número de frames exibidos por cada foto no vídeo (ex: 60 para manter 1 foto/segundo em 60 FPS, padrão: 1).
 - `--crop`: Posição do corte vertical (`center`, `top`, `bottom`).
 - `--crf`: Fator de qualidade CRF (menor = maior qualidade, padrão 15).
+- `--no-wizard`: Não executa o assistente inicial caso o `config.json` não exista.
 - `--rename-source`: Renomeia as fotos de origem pelo EXIF (`%Y-%m-%d_%H-%M-%S_<original>.jpg`) e encerra.
 - `--run-all`: Executa o pipeline completo (corte + renderização) sem abrir o menu.
 - `--test`: Executa o teste rápido com amostragem reduzida e encerra.

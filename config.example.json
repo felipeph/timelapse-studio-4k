@@ -1,0 +1,12 @@
+{
+  "source_dir": ".",
+  "output_dir": "fotos_cortadas_4k",
+  "fps": 60,
+  "frames_per_image": 1,
+  "crop_mode": "center",
+  "crf": 15,
+  "preset": "ultrafast",
+  "target_width": 3840,
+  "target_height": 2160,
+  "test_sample_size": 120
+}
