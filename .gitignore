@@ -15,6 +15,17 @@ ENV/
 config.json
 *.local.json
 
+# Credenciais e Segredos (OAuth Google / YouTube)
+secrets/*
+!secrets/client_secrets.example.json
+client_secrets.json
+token.json
+credentials.json
+
+# Logs (Histórico geral e por projeto)
+logs/
+*.log
+
 # Arquivos de mídia e diretórios de processamento pesado
 DCIM/
 fotos_cortadas_4k/

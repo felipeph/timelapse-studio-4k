@@ -26,6 +26,9 @@ import subprocess
 import concurrent.futures
 from PIL import Image, ExifTags
 
+import logger
+import youtube_uploader
+
 CONFIG_FILE = "config.json"
 
 # Configurações Padrão
@@ -42,7 +45,10 @@ DEFAULT_CONFIG = {
     "output_video": "timelapse_4k_cortado.mp4",
     "test_sample_size": 120,
     "test_output_video": "timelapse_teste_4k.mp4",
-    "auto_clean_crops": True
+    "auto_clean_crops": True,
+    "youtube_auto_upload": True,
+    "youtube_privacy_status": "unlisted",
+    "youtube_category_id": "22"
 }
 
 def load_config(config_path=CONFIG_FILE):
@@ -73,7 +79,7 @@ def save_config(config, config_path=CONFIG_FILE):
             "source_dir", "output_dir", "fps", "frames_per_image", 
             "crop_mode", "crf", "preset", "target_width", 
             "target_height", "test_sample_size", "output_video", "test_output_video",
-            "auto_clean_crops"
+            "auto_clean_crops", "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id"
         ]
         save_dict = {k: config[k] for k in keys_to_save if k in config}
         with open(config_path, "w", encoding="utf-8") as f:
@@ -173,13 +179,19 @@ def get_output_dir(config):
         return os.path.abspath(output_dir_name)
     return os.path.abspath(os.path.join(source_dir, output_dir_name))
 
-def print_banner(config=None):
+def print_banner(config=None, project_id=None):
     """Exibe o cabeçalho decorado do programa e as configurações atuais ativas."""
     print("=" * 66)
     print("                TIMELAPSE STUDIO 4K UHD")
     print("   Automação Multicâmeras (GoPro, Canon, etc.) & Renderização")
     print("=" * 66)
     if config:
+        if not project_id:
+            try:
+                project_id = logger.get_project_id(config.get("source_dir", "."), config.get("output_dir", "fotos_cortadas_4k"))
+            except Exception:
+                project_id = "N/A"
+                
         crop_mode = config.get("crop_mode", "center")
         crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode)
         source_dir = config.get("source_dir", ".")
@@ -193,7 +205,12 @@ def print_banner(config=None):
             
         auto_clean = config.get("auto_clean_crops", True)
         clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada"
+        yt_auto = config.get("youtube_auto_upload", True)
+        yt_privacy = config.get("youtube_privacy_status", "unlisted")
+        yt_status = f"Ativado ({yt_privacy})" if yt_auto else "Desativado"
             
+        print(f" PROJETO ATUAL: {project_id}")
+        print("-" * 66)
         print(" CONFIGURAÇÕES ATUAIS:")
         print(f"   • Pasta de Origem (Fotos): {source_display}")
         print(f"   • Pasta de Cortes (4K)   : {output_dir_display}")
@@ -204,6 +221,7 @@ def print_banner(config=None):
         print(f"   • Resolução Alvo          : {config['target_width']}x{config['target_height']} (4K UHD)")
         print(f"   • Amostra Modo Teste      : {config['test_sample_size']} fotos")
         print(f"   • Limpeza Pós-Vídeo       : {clean_status}")
+        print(f"   • Upload YouTube          : {yt_status}")
         print("=" * 66)
 
 def print_progress_bar(current, total, start_time, prefix="Progresso"):
@@ -716,21 +734,24 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
         return False, encoder_name
 
 def run_step_2_video(config, is_test=False):
-    """Etapa 2: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU e metadados."""
+    """Etapa 3: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU e metadados."""
     input_dir = get_output_dir(config)
     source_dir = config.get("source_dir", ".")
+    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
     
     if not os.path.exists(input_dir):
         print(f"\n[-] Erro: A pasta '{input_dir}' não foi encontrada.")
-        print("    Por favor, execute a Etapa 1 primeiro para gerar as fotos cortadas.")
-        return False
+        print("    Por favor, execute a Etapa 2 primeiro para gerar as fotos cortadas.")
+        logger.log_event(project_id, "etapa_3_video", f"Pasta de cortes não encontrada: {input_dir}", level="ERROR")
+        return False, None
 
     pattern = os.path.join(input_dir, "*.jpg")
     cropped_photos = sorted(glob.glob(pattern))
 
     if not cropped_photos:
         print(f"\n[-] Erro: Nenhuma imagem JPG encontrada na pasta '{input_dir}'.")
-        return False
+        logger.log_event(project_id, "etapa_3_video", f"Nenhuma imagem encontrada em: {input_dir}", level="ERROR")
+        return False, None
 
     video_name, first_dt, last_dt, range_str = generate_video_info(cropped_photos, is_test=is_test)
     output_path = os.path.abspath(os.path.join(source_dir, video_name))
@@ -744,12 +765,18 @@ def run_step_2_video(config, is_test=False):
     # Se a GPU (ex: Intel QSV) falhar, faz fallback automático transparente para CPU (libx264)
     if not success and "CPU" not in encoder_used:
         print("\n[!] TENTANDO RENDERIZAR VIA CPU (libx264) COMO FALLBACK DE SEGURANÇA...")
-        success, _ = render_video_ffmpeg(
+        logger.log_event(project_id, "etapa_3_video", f"Tentando fallback para CPU (GPU {encoder_used} falhou).", level="WARN")
+        success, encoder_used = render_video_ffmpeg(
             config, cropped_photos, output_path, force_cpu=True,
             first_dt=first_dt, last_dt=last_dt, range_str=range_str
         )
         
-    return success
+    if success:
+        logger.log_event(project_id, "etapa_3_video", f"Vídeo renderizado com sucesso: {output_path} ({encoder_used})")
+        return True, output_path
+    else:
+        logger.log_event(project_id, "etapa_3_video", f"Falha na renderização de: {output_path}", level="ERROR")
+        return False, None
 
 def quick_change_crop(config):
     """Menu de atalho rápido para alterar a posição de enquadramento/corte (crop 16:9)."""
@@ -865,12 +892,15 @@ def quick_change_fpi(config):
         print("[+] Frames por imagem mantido.")
 
 def run_test_mode(config):
-    """Executa as Etapas 1 e 2 em modo de teste rápido com amostragem reduzida e confirmação de parâmetros."""
+    """Executa as Etapas 2 e 3 em modo de teste rápido com amostragem reduzida."""
+    source_dir = config.get("source_dir", ".")
+    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
     crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
     dur_photo = fpi / fps if fps > 0 else 0
     print(f"\n[!] INICIANDO MODO TESTE RÁPIDO ({config['test_sample_size']} FOTOS)")
+    print(f"    Projeto: {project_id}")
     print(f"    FPS: {fps} fps | Frames/Foto: {fpi} ({dur_photo:.2f}s/foto) | Corte: {crop_short}")
     
     change_prompt = input("Deseja alterar FPS/Frames por Foto, Pasta de Origem ou Modo de Corte antes do teste? (s/N): ").strip().lower()
@@ -880,15 +910,20 @@ def run_test_mode(config):
         quick_change_fpi(config)
         quick_change_crop(config)
         
+    logger.log_event(project_id, "resumo_projeto", f"Iniciando Modo Teste ({config['test_sample_size']} fotos)")
     success, _ = run_step_1_crop(config, max_photos=config["test_sample_size"])
     if success:
         run_step_2_video(config, is_test=True)
 
-def run_step_4_clean_crops(config, non_interactive=False):
+def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
     """
     Etapa 4: Remove as fotos cortadas intermediárias (fotos_cortadas_4k)
     para liberar espaço em disco após a renderização do vídeo.
     """
+    source_dir = config.get("source_dir", ".")
+    if not project_id:
+        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+        
     output_dir = get_output_dir(config)
     if not os.path.exists(output_dir):
         if not non_interactive:
@@ -917,60 +952,168 @@ def run_step_4_clean_crops(config, non_interactive=False):
         shutil.rmtree(output_dir)
         print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({size_mb:.2f} MB liberados).")
         print("=" * 66)
+        logger.log_event(project_id, "etapa_4_clean", f"Pasta '{output_dir}' apagada com sucesso ({total_files} arquivos, {size_mb:.2f} MB liberados).")
         return True
     except Exception as e:
         print(f"[-] Erro ao remover a pasta '{output_dir}': {e}")
+        logger.log_event(project_id, "etapa_4_clean", f"Erro ao remover '{output_dir}': {e}", level="ERROR")
         return False
+
+def run_step_5_youtube_upload(config, video_path=None, project_id=None):
+    """
+    Etapa 5: Publicação oficial de vídeo no YouTube via YouTube Data API v3.
+    """
+    source_dir = config.get("source_dir", ".")
+    if not project_id:
+        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+        
+    if not video_path:
+        video_files = glob.glob(os.path.join(source_dir, "*.mp4"))
+        if not video_files:
+            print(f"\n[-] Nenhum vídeo .mp4 encontrado na pasta de origem '{os.path.abspath(source_dir)}'.")
+            custom_path = input("Digite ou arraste o caminho do arquivo .mp4 para upload (ou Enter para cancelar): ").strip()
+            if not custom_path:
+                print("[+] Upload cancelado.")
+                return False, None
+            cleaned = sanitize_path(custom_path)
+            if not os.path.exists(cleaned):
+                print(f"[-] Arquivo '{cleaned}' não encontrado.")
+                return False, None
+            video_path = cleaned
+        elif len(video_files) == 1:
+            video_path = video_files[0]
+            print(f"\n[+] Vídeo selecionado: {os.path.basename(video_path)}")
+        else:
+            print("\n" + "=" * 66)
+            print("           SELEÇÃO DE VÍDEO PARA UPLOAD NO YOUTUBE")
+            print("=" * 66)
+            for idx, vf in enumerate(video_files, 1):
+                sz = os.path.getsize(vf) / (1024 * 1024)
+                print(f"  [{idx}] {os.path.basename(vf)} ({sz:.2f} MB)")
+            print("  [0] Digitar outro caminho / Cancelar")
+            print("-" * 66)
+            vchoice = input(f"Escolha o vídeo para upload [1-{len(video_files)}]: ").strip()
+            if vchoice.isdigit() and 1 <= int(vchoice) <= len(video_files):
+                video_path = video_files[int(vchoice) - 1]
+            else:
+                custom_path = input("Digite ou arraste o caminho do arquivo .mp4 (ou Enter para cancelar): ").strip()
+                if not custom_path:
+                    print("[+] Upload cancelado.")
+                    return False, None
+                cleaned = sanitize_path(custom_path)
+                if not os.path.exists(cleaned):
+                    print(f"[-] Arquivo '{cleaned}' não encontrado.")
+                    return False, None
+                video_path = cleaned
+
+    base_name = os.path.basename(video_path)
+    title = f"Timelapse 4K UHD - {base_name.replace('.mp4', '')}"
+    fps = config.get("fps", 60)
+    res = f"{config.get('target_width', 3840)}x{config.get('target_height', 2160)}"
+    privacy = config.get("youtube_privacy_status", "unlisted")
+    category = config.get("youtube_category_id", "22")
+    
+    desc = (
+        f"Vídeo timelapse gravado e renderizado em {res} (4K UHD) a {fps} FPS.\n\n"
+        f"• Projeto: {project_id}\n"
+        f"• Software: Timelapse Studio 4K UHD\n"
+        f"• Processamento: PIL Multiprocessing + FFmpeg Hardware Acceleration\n"
+    )
+    
+    tags = ["timelapse", "4k", "timelapse studio", "uhd", "gopro", "canon", "photography"]
+    
+    metadata = {
+        "title": title,
+        "description": desc,
+        "tags": tags,
+        "privacy_status": privacy,
+        "category_id": category
+    }
+    
+    success, url, vid = youtube_uploader.upload_video_resumable(video_path, metadata=metadata, project_id=project_id)
+    return success, url
 
 def run_full_pipeline(config):
     """
-    Executa o fluxo completo de 4 etapas:
+    Executa o fluxo completo de 5 etapas:
     Etapa 1: Organizar/Renomear fotos de origem por EXIF
     Etapa 2: Cortar e redimensionar fotos para 4K UHD 16:9
     Etapa 3: Gerar vídeo timelapse 4K
     Etapa 4: Limpar fotos cortadas intermediárias (se auto_clean_crops estiver ativo)
+    Etapa 5: Publicar vídeo no YouTube (se youtube_auto_upload estiver ativo)
     """
+    source_dir = config.get("source_dir", ".")
+    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    
     crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
     dur_photo = fpi / fps if fps > 0 else 0
     auto_clean = config.get("auto_clean_crops", True)
+    yt_auto = config.get("youtube_auto_upload", True)
+    yt_priv = config.get("youtube_privacy_status", "unlisted")
     
     print("\n" + "=" * 66)
-    print("        INICIANDO FLUXO COMPLETO (ETAPAS 1 ➔ 2 ➔ 3 ➔ 4)")
+    print("      INICIANDO FLUXO COMPLETO (ETAPAS 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
     print("=" * 66)
+    print(f"    Projeto     : {project_id}")
     print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
-    print(f"    Limpeza automática pós-vídeo: {'Ativada' if auto_clean else 'Desativada'}")
+    print(f"    Limpeza pós-vídeo : {'Ativada' if auto_clean else 'Desativada'}")
+    print(f"    Upload YouTube    : {'Ativado (' + yt_priv + ')' if yt_auto else 'Desativado'}")
     print("-" * 66)
     
+    logger.log_event(project_id, "resumo_projeto", f"Iniciando Fluxo Completo | FPS: {fps} | FPI: {fpi} | CRF: {config['crf']}")
+    
     # Etapa 1: Renomear fotos de origem por EXIF
-    print("\n>>> [1/4] ETAPA 1: Organizando e Renomeando Fotos de Origem por EXIF...")
-    rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True)
+    print("\n>>> [1/5] ETAPA 1: Organizando e Renomeando Fotos de Origem por EXIF...")
+    renamed = rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True)
+    logger.log_event(project_id, "etapa_1_rename", f"Fotos renomeadas por EXIF: {renamed} arquivos.")
     
     # Etapa 2: Cortar e Redimensionar Fotos para 4K
-    print("\n>>> [2/4] ETAPA 2: Cortando e Redimensionando Fotos para 4K UHD...")
+    print("\n>>> [2/5] ETAPA 2: Cortando e Redimensionando Fotos para 4K UHD...")
     crop_ok, _ = run_step_1_crop(config)
     if not crop_ok:
-        print("\n[-] Interrompendo pipeline: falha na Etapa 2 (Corte).")
+        msg = "Interrompendo pipeline: falha na Etapa 2 (Corte)."
+        print(f"\n[-] {msg}")
+        logger.log_event(project_id, "resumo_projeto", msg, level="ERROR")
         return
         
     # Etapa 3: Renderizar Vídeo Timelapse 4K
-    print("\n>>> [3/4] ETAPA 3: Renderizando Vídeo Timelapse 4K...")
-    video_ok, _ = run_step_2_video(config, is_test=False)
-    if not video_ok:
-        print("\n[-] Interrompendo pipeline: falha na Etapa 3 (Renderização de Vídeo).")
+    print("\n>>> [3/5] ETAPA 3: Renderizando Vídeo Timelapse 4K...")
+    video_ok, video_path = run_step_2_video(config, is_test=False)
+    if not video_ok or not video_path:
+        msg = "Interrompendo pipeline: falha na Etapa 3 (Renderização de Vídeo)."
+        print(f"\n[-] {msg}")
+        logger.log_event(project_id, "resumo_projeto", msg, level="ERROR")
         return
         
     # Etapa 4: Limpeza das fotos cortadas intermediárias
     if auto_clean:
-        print("\n>>> [4/4] ETAPA 4: Limpando Fotos Cortadas Intermediárias...")
-        run_step_4_clean_crops(config, non_interactive=True)
+        print("\n>>> [4/5] ETAPA 4: Limpando Fotos Cortadas Intermediárias...")
+        run_step_4_clean_crops(config, non_interactive=True, project_id=project_id)
     else:
         print("\n[i] Etapa 4 ignorada (auto_clean_crops desativado nas configurações).")
         
+    # Etapa 5: Publicação no YouTube
+    yt_url = None
+    if yt_auto:
+        print("\n>>> [5/5] ETAPA 5: Publicando Vídeo no YouTube...")
+        yt_ok, yt_url = run_step_5_youtube_upload(config, video_path=video_path, project_id=project_id)
+        if not yt_ok:
+            print("\n[!] Aviso: Não foi possível concluir o upload no YouTube, mas o vídeo local foi gerado com sucesso.")
+    else:
+        print("\n[i] Etapa 5 ignorada (youtube_auto_upload desativado nas configurações).")
+        
     print("\n" + "=" * 66)
     print("       🎉 FLUXO COMPLETO FINALIZADO COM SUCESSO!")
+    if yt_url:
+        print(f"       🔗 Link no YouTube: {yt_url}")
     print("=" * 66)
+    
+    summary_line = f"Fluxo Completo Concluído com sucesso! Vídeo: {os.path.basename(video_path)}"
+    if yt_url:
+        summary_line += f" | YouTube: {yt_url}"
+    logger.log_event(project_id, "resumo_projeto", summary_line, level="INFO")
 
 def clean_manager(config):
     """Atalho utilitário para limpeza."""
@@ -990,27 +1133,32 @@ def edit_settings(config, config_path=CONFIG_FILE):
         dur_photo = fpi / fps if fps > 0 else 0
         auto_clean = config.get("auto_clean_crops", True)
         clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada (Mantém fotos cortadas)"
+        yt_auto = config.get("youtube_auto_upload", True)
+        yt_privacy = config.get("youtube_privacy_status", "unlisted")
+        yt_status = "Ativado (Etapa 5 no fluxo completo)" if yt_auto else "Desativado"
             
         print("\n" + "="*66)
         print("               CONFIGURAÇÕES DO TIMELAPSE STUDIO")
         print("="*66)
-        print(f"[1] Pasta de Origem (Fotos)      : {source_display}")
-        print(f"    ↳ Pasta de Cortes (4K)       : {output_dir_display}")
-        print(f"[2] Taxa de Quadros (FPS)        : {fps} fps")
-        print(f"[3] Frames por Imagem (FPI)      : {fpi} frame(s)/foto ({dur_photo:.2f}s por foto)")
-        print(f"[4] Modo de Corte (Crop 16:9)    : {crop_label}")
-        print(f"[5] Qualidade FFmpeg (CRF)       : {config['crf']} (Menor = melhor qualidade)")
-        print(f"[6] Resolução de saída           : {config['target_width']}x{config['target_height']} (4K UHD)")
-        print(f"[7] Amostragem Modo Teste        : {config['test_sample_size']} fotos")
-        print(f"[8] Preset FFmpeg                : {config['preset']}")
-        print(f"[9] Limpeza Automática Pós-Vídeo : {clean_status}")
+        print(f"[1]  Pasta de Origem (Fotos)      : {source_display}")
+        print(f"     ↳ Pasta de Cortes (4K)       : {output_dir_display}")
+        print(f"[2]  Taxa de Quadros (FPS)        : {fps} fps")
+        print(f"[3]  Frames por Imagem (FPI)      : {fpi} frame(s)/foto ({dur_photo:.2f}s por foto)")
+        print(f"[4]  Modo de Corte (Crop 16:9)    : {crop_label}")
+        print(f"[5]  Qualidade FFmpeg (CRF)       : {config['crf']} (Menor = melhor qualidade)")
+        print(f"[6]  Resolução de saída           : {config['target_width']}x{config['target_height']} (4K UHD)")
+        print(f"[7]  Preset FFmpeg                : {config['preset']}")
+        print(f"[8]  Limpeza Automática Pós-Vídeo : {clean_status}")
+        print(f"[9]  Upload Automático ao YouTube : {yt_status}")
+        print(f"[10] Privacidade no YouTube      : {yt_privacy} (unlisted / private / public)")
+        print(f"[11] Amostragem Modo Teste       : {config['test_sample_size']} fotos")
         print("-" * 66)
         print(f"[S] Salvar Configurações Atuais no '{config_path}'")
         print("[D] Restaurar Configurações Padrão de Fábrica (Reset)")
         print("[0] Voltar ao Menu Principal")
         print("=" * 66)
         
-        choice = input("Escolha uma opção [0-9, S ou D]: ").strip().lower()
+        choice = input("Escolha uma opção [0-11, S ou D]: ").strip().lower()
         if choice == "1":
             select_source_dir(config)
         elif choice == "2":
@@ -1030,17 +1178,35 @@ def edit_settings(config, config_path=CONFIG_FILE):
                 config["target_width"] = int(w)
                 config["target_height"] = int(h)
         elif choice == "7":
-            val = input(f"Nº de Fotos no Teste [{config['test_sample_size']}]: ").strip()
-            if val.isdigit():
-                config["test_sample_size"] = int(val)
-        elif choice == "8":
             val = input(f"Novo Preset (ultrafast/medium/slow) [{config['preset']}]: ").strip()
             if val in ["ultrafast", "medium", "slow"]:
                 config["preset"] = val
-        elif choice == "9":
+        elif choice == "8":
             config["auto_clean_crops"] = not config.get("auto_clean_crops", True)
             print(f"\n[+] Limpeza automática pós-renderização: {'Ativada' if config['auto_clean_crops'] else 'Desativada'}.")
             time.sleep(1.0)
+        elif choice == "9":
+            config["youtube_auto_upload"] = not config.get("youtube_auto_upload", True)
+            print(f"\n[+] Upload automático ao YouTube: {'Ativado' if config['youtube_auto_upload'] else 'Desativado'}.")
+            time.sleep(1.0)
+        elif choice == "10":
+            print("\nPrivacidade do Vídeo no YouTube:")
+            print("  [1] unlisted (Não listado - apenas quem tem o link pode ver - Recomendado)")
+            print("  [2] private  (Privado - apenas você pode ver no YouTube Studio)")
+            print("  [3] public   (Público - visível para todos no seu canal)")
+            p_choice = input(f"Escolha [1/2/3, atual: {yt_privacy}]: ").strip()
+            if p_choice == "1":
+                config["youtube_privacy_status"] = "unlisted"
+            elif p_choice == "2":
+                config["youtube_privacy_status"] = "private"
+            elif p_choice == "3":
+                config["youtube_privacy_status"] = "public"
+            print(f"[+] Privacidade alterada para: {config['youtube_privacy_status']}")
+            time.sleep(1.0)
+        elif choice == "11":
+            val = input(f"Nº de Fotos no Teste [{config['test_sample_size']}]: ").strip()
+            if val.isdigit():
+                config["test_sample_size"] = int(val)
         elif choice == "s":
             if save_config(config, config_path):
                 print(f"\n[+] Configurações salvas em '{config_path}' com sucesso!")
@@ -1109,6 +1275,11 @@ def parse_arguments():
         help="Não exibe o assistente interativo de primeira execução caso o arquivo JSON não exista."
     )
     parser.add_argument(
+        "--no-upload",
+        action="store_true",
+        help="Desativa o upload automático para o YouTube na execução via linha de comando."
+    )
+    parser.add_argument(
         "--rename-source",
         action="store_true",
         help="Renomeia todas as fotos da pasta de origem com o formato %%Y-%%m-%%d_%%H-%%M-%%S_<nome_original>.jpg e encerra."
@@ -1116,7 +1287,7 @@ def parse_arguments():
     parser.add_argument(
         "--run-all",
         action="store_true",
-        help="Executa o pipeline completo (Etapas 1 ➔ 2 ➔ 3 ➔ 4) e encerra sem abrir o menu interativo."
+        help="Executa o pipeline completo (Etapas 1 -> 2 -> 3 -> 4 -> 5) e encerra sem abrir o menu interativo."
     )
     parser.add_argument(
         "--test",
@@ -1126,6 +1297,14 @@ def parse_arguments():
     return parser.parse_args()
 
 def main():
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
     args = parse_arguments()
     config_file = args.config_file
     
@@ -1155,6 +1334,8 @@ def main():
         config["crop_mode"] = args.crop_mode
     if args.crf is not None:
         config["crf"] = args.crf
+    if args.no_upload:
+        config["youtube_auto_upload"] = False
 
     # Renomeação direta via CLI
     if args.rename_source:
@@ -1176,21 +1357,24 @@ def main():
 
     # Modo interativo CLI (Tela 1: Menu Principal)
     while True:
-        print_banner(config)
+        source_dir = config.get("source_dir", ".")
+        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+        print_banner(config, project_id=project_id)
         print("MENU PRINCIPAL:")
-        print("  [ENTER] 🚀 EXECUTAR FLUXO COMPLETO (Padrão: Etapas 1 ➔ 2 ➔ 3 ➔ 4)")
+        print("  [ENTER] 🚀 EXECUTAR FLUXO COMPLETO (Padrão: Etapas 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
         print("  " + "-" * 58)
         print("  [1] Etapa 1: Organizar e Renomear Fotos de Origem por EXIF")
         print("  [2] Etapa 2: Cortar e Redimensionar Fotos para 4K UHD 16:9 (PIL)")
         print("  [3] Etapa 3: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
         print("  [4] Etapa 4: Limpar / Apagar Fotos Cortadas Intermediárias")
-        print("  [5] Modo Teste Rápido (Amostra reduzida de 120 fotos)")
-        print("  [6] Executar Fluxo Completo (Etapas 1 ➔ 2 ➔ 3 ➔ 4)")
-        print("  [7] ⚙️  Menu de Configurações (Pasta, FPS, Frames/Foto, Corte, CRF, etc.)")
+        print("  [5] Etapa 5: Publicar Vídeo no YouTube (YouTube Data API v3)")
+        print("  [6] Executar Fluxo Completo (Etapas 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
+        print("  [7] ⚙️  Menu de Configurações (Pasta, FPS, Corte, CRF, YouTube, etc.)")
+        print("  [8] Modo Teste Rápido (Amostra reduzida de 120 fotos)")
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-7 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
+        choice = input("Selecione uma opção [0-8 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
         
         if choice in ["", "6"]:
             run_full_pipeline(config)
@@ -1205,18 +1389,21 @@ def main():
             run_step_2_video(config)
             input("\nPressione Enter para continuar...")
         elif choice == "4":
-            run_step_4_clean_crops(config, non_interactive=False)
+            run_step_4_clean_crops(config, non_interactive=False, project_id=project_id)
             input("\nPressione Enter para continuar...")
         elif choice == "5":
-            run_test_mode(config)
+            run_step_5_youtube_upload(config, project_id=project_id)
             input("\nPressione Enter para continuar...")
         elif choice == "7":
             edit_settings(config, config_file)
+        elif choice == "8":
+            run_test_mode(config)
+            input("\nPressione Enter para continuar...")
         elif choice == "0":
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-7].")
+            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-8].")
             time.sleep(1)
 
 if __name__ == "__main__":

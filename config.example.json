@@ -9,5 +9,8 @@
   "target_width": 3840,
   "target_height": 2160,
   "test_sample_size": 120,
-  "auto_clean_crops": true
+  "auto_clean_crops": true,
+  "youtube_auto_upload": true,
+  "youtube_privacy_status": "unlisted",
+  "youtube_category_id": "22"
 }
