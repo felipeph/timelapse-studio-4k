@@ -1178,18 +1178,19 @@ def main():
     while True:
         print_banner(config)
         print("MENU PRINCIPAL:")
-        print("  [ENTER] ou [6] 🚀 EXECUTAR FLUXO COMPLETO (Etapas 1 ➔ 2 ➔ 3 ➔ 4)")
+        print("  [ENTER] 🚀 EXECUTAR FLUXO COMPLETO (Padrão: Etapas 1 ➔ 2 ➔ 3 ➔ 4)")
         print("  " + "-" * 58)
         print("  [1] Etapa 1: Organizar e Renomear Fotos de Origem por EXIF")
         print("  [2] Etapa 2: Cortar e Redimensionar Fotos para 4K UHD 16:9 (PIL)")
         print("  [3] Etapa 3: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
         print("  [4] Etapa 4: Limpar / Apagar Fotos Cortadas Intermediárias")
         print("  [5] Modo Teste Rápido (Amostra reduzida de 120 fotos)")
+        print("  [6] Executar Fluxo Completo (Etapas 1 ➔ 2 ➔ 3 ➔ 4)")
         print("  [7] ⚙️  Menu de Configurações (Pasta, FPS, Frames/Foto, Corte, CRF, etc.)")
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-5, 7 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
+        choice = input("Selecione uma opção [0-7 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
         
         if choice in ["", "6"]:
             run_full_pipeline(config)
@@ -1215,7 +1216,7 @@ def main():
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-5, 7].")
+            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-7].")
             time.sleep(1)
 
 if __name__ == "__main__":

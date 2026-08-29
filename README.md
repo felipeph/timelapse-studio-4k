@@ -78,6 +78,7 @@ python timelapse_studio.py
 - `[3]`: Etapa 3 - Gerar o vídeo timelapse 4K.
 - `[4]`: Etapa 4 - Limpar/apagar a pasta de fotos cortadas intermediárias.
 - `[5]`: Modo Teste Rápido (amostra de 120 fotos).
+- `[6]`: Executar Fluxo Completo (Etapas 1 a 4).
 - `[7]`: ⚙️ Abrir a **Tela 2 de Configurações**.
 - `[0]`: Sair.
 
