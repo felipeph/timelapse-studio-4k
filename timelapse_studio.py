@@ -236,10 +236,10 @@ def print_banner(config=None, project_id=None):
         print(f"   • Notificações            : Toast Windows + NTFY ({ntfy_topic})")
         print("=" * 66)
 
-def print_progress_bar(current, total, start_time, prefix="Progresso"):
-    """Exibe uma barra de progresso formatada com caracteres ASCII seguros no terminal."""
+def print_progress_bar(current, total, start_time, prefix="Progresso", current_item=""):
+    """Exibe uma barra de progresso formatada com caracteres ASCII seguros no terminal e item atual."""
     percent = current / total if total > 0 else 1.0
-    bar_length = 28
+    bar_length = 22
     hashes = '=' * int(round(percent * bar_length))
     spaces = '-' * (bar_length - len(hashes))
     
@@ -255,11 +255,15 @@ def print_progress_bar(current, total, start_time, prefix="Progresso"):
     if eta >= 3600:
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta))
         
+    item_str = f" | {current_item}" if current_item else ""
+    if len(item_str) > 42:
+        item_str = item_str[:39] + "..."
+        
     sys.stdout.write(
         f"\r{prefix}: [{hashes}{spaces}] {percent*100:.1f}% | "
         f"{current}/{total} | "
         f"{fps:.1f} it/s | "
-        f"Tempo: {elapsed_str} | ETA: {eta_str}"
+        f"Tempo: {elapsed_str} | ETA: {eta_str}{item_str}   "
     )
     sys.stdout.flush()
 
@@ -389,10 +393,31 @@ def select_source_dir(config):
     else:
         print("[-] Opção inválida. Pasta de origem mantida.")
 
+def process_single_rename(img_path):
+    """
+    Worker para extrair EXIF e renomear uma foto de origem.
+    Retorna (sucesso: bool, old_name: str, new_name: str, motivo: str).
+    """
+    dir_name = os.path.dirname(img_path)
+    old_filename = os.path.basename(img_path)
+    try:
+        new_filename = format_photo_name(img_path)
+        if old_filename != new_filename:
+            new_path = os.path.join(dir_name, new_filename)
+            if not os.path.exists(new_path):
+                os.rename(img_path, new_path)
+                return True, old_filename, new_filename, "Renomeado com sucesso"
+            else:
+                return False, old_filename, new_filename, "Destino já existe"
+        return False, old_filename, old_filename, "Já formatado"
+    except Exception as e:
+        return False, old_filename, old_filename, str(e)
+
 def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_interactive=False, project_id=None, config=None):
     """
     Renomeia todas as fotos JPG/JPEG na pasta de origem com a data/hora do EXIF:
     %Y-%m-%d_%H-%M-%S_<nome_original>.jpg
+    Exibe barra de progresso em tempo real e nome de cada arquivo.
     """
     if not project_id:
         project_id = logger.get_project_id(source_dir, output_dir_name)
@@ -418,28 +443,44 @@ def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_in
             
     tracker.update_stage_status(project_id, "etapa_1", "in_progress")
     renamed_count = 0
-    for img_path in photos:
-        dir_name = os.path.dirname(img_path)
-        old_filename = os.path.basename(img_path)
-        new_filename = format_photo_name(img_path)
-        
-        if old_filename != new_filename:
-            new_path = os.path.join(dir_name, new_filename)
-            if not os.path.exists(new_path):
-                try:
-                    os.rename(img_path, new_path)
-                    renamed_count += 1
-                except Exception as e:
-                    print(f"[-] Erro ao renomear {old_filename}: {e}")
-                    
-    print(f"[+] Concluído! {renamed_count} arquivos renomeados com sucesso.")
+    kept_count = 0
+    errors = 0
+    total = len(photos)
+    start_time = time.time()
+    
+    # Processamento concorrente para agilizar operações em milhares de fotos
+    max_workers = min(32, (os.cpu_count() or 4) * 4)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_single_rename, p) for p in photos]
+        for idx, future in enumerate(concurrent.futures.as_completed(futures), 1):
+            success, old_name, new_name, reason = future.result()
+            if success:
+                renamed_count += 1
+                logger.log_event(project_id, "etapa_1_rename", f"Renomeado: {old_name} -> {new_name}", to_general=False)
+                item_display = f"{old_name} -> {new_name}"
+            else:
+                if reason == "Já formatado":
+                    kept_count += 1
+                else:
+                    errors += 1
+                    logger.log_event(project_id, "etapa_1_rename", f"Erro em {old_name}: {reason}", level="WARN", to_general=False)
+                item_display = f"{old_name} ({reason})"
+                
+            print_progress_bar(idx, total, start_time, prefix="Renomeando fotos", current_item=item_display)
+            
+    print() # Pular linha
+    total_time = time.time() - start_time
+    print("-" * 66)
+    print(f"[+] Concluído! {renamed_count} arquivos renomeados, {kept_count} mantidos em {total_time:.1f}s ({total/total_time:.1f} fotos/s).")
+    if errors > 0:
+        print(f"[!] {errors} arquivos apresentaram erros ou conflitos.")
     print("=" * 66)
     
     # Atualiza tracking e dispara notificações
-    tracker.update_stage_status(project_id, "etapa_1", "completed", details=f"{renamed_count} fotos renomeadas ({len(photos)} fotos totais)")
-    logger.log_event(project_id, "etapa_1_rename", f"Fotos renomeadas por EXIF: {renamed_count} arquivos.")
+    tracker.update_stage_status(project_id, "etapa_1", "completed", details=f"{renamed_count} fotos renomeadas, {kept_count} mantidas ({total} fotos totais)")
+    logger.log_event(project_id, "etapa_1_rename", f"Etapa 1 finalizada: {renamed_count} fotos renomeadas, {kept_count} mantidas.")
     ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026") if config else "timelapse-studio-2026"
-    notifier.notify_stage_completion(project_id, 1, "Organização e Renomeação EXIF", details=f"{renamed_count} fotos renomeadas ({len(photos)} fotos totais)", ntfy_topic=ntfy_topic)
+    notifier.notify_stage_completion(project_id, 1, "Organização e Renomeação EXIF", details=f"{renamed_count} fotos renomeadas ({total} fotos totais)", ntfy_topic=ntfy_topic)
     return renamed_count
 
 def process_single_image(task):
@@ -569,9 +610,14 @@ def run_step_1_crop(config, max_photos=None):
         for future in concurrent.futures.as_completed(futures):
             completed += 1
             success, res = future.result()
-            if not success:
+            if success:
+                item_name = os.path.basename(res)
+                logger.log_event(project_id, "etapa_2_crop", f"Cortado 4K: {item_name}", to_general=False)
+            else:
                 errors += 1
-            print_progress_bar(completed, total, start_time, prefix="Processando fotos")
+                item_name = f"Erro: {res}"
+                logger.log_event(project_id, "etapa_2_crop", res, level="WARN", to_general=False)
+            print_progress_bar(completed, total, start_time, prefix="Processando fotos", current_item=item_name)
 
     print() # Pular linha
     total_time = time.time() - start_time
@@ -739,7 +785,7 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
             with open(img_path, "rb") as f:
                 img_bytes = f.read()
             process.stdin.write(img_bytes)
-            print_progress_bar(idx + 1, total_photos, start_time, prefix="Renderizando vídeo")
+            print_progress_bar(idx + 1, total_photos, start_time, prefix="Renderizando vídeo", current_item=os.path.basename(img_path))
     except IOError as e:
         print(f"\n[-] Erro de comunicação com o FFmpeg: {e}")
         return False, encoder_name
@@ -988,8 +1034,21 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
     tracker.update_stage_status(project_id, "etapa_4", "in_progress")
     try:
         import shutil
-        shutil.rmtree(output_dir)
-        print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({size_mb:.2f} MB liberados).")
+        start_time = time.time()
+        for idx, f in enumerate(photos, 1):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+            if idx % 10 == 0 or idx == total_files:
+                print_progress_bar(idx, total_files, start_time, prefix="Apagando fotos", current_item=os.path.basename(f))
+        try:
+            shutil.rmtree(output_dir, ignore_errors=True)
+        except Exception:
+            pass
+            
+        print() # Pular linha
+        print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({total_files} arquivos, {size_mb:.2f} MB liberados).")
         print("=" * 66)
         tracker.update_stage_status(project_id, "etapa_4", "completed", details=f"{total_files} arquivos temporários apagados ({size_mb:.2f} MB liberados)")
         logger.log_event(project_id, "etapa_4_clean", f"Pasta '{output_dir}' apagada com sucesso ({total_files} arquivos, {size_mb:.2f} MB liberados).")
