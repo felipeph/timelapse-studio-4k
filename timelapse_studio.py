@@ -17,12 +17,26 @@ Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS, Pasta 
 
 import os
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import glob
 import time
 import json
 import argparse
 import datetime
 import subprocess
+import urllib.request
+import urllib.parse
 import concurrent.futures
 from PIL import Image, ExifTags
 
@@ -51,6 +65,7 @@ DEFAULT_CONFIG = {
     "youtube_auto_upload": True,
     "youtube_privacy_status": "unlisted",
     "youtube_category_id": "22",
+    "youtube_custom_tags": [],
     "stage_interval_seconds": 180,
     "ntfy_topic": "timelapse-studio-2026"
 }
@@ -84,7 +99,7 @@ def save_config(config, config_path=CONFIG_FILE):
             "crop_mode", "crf", "preset", "target_width", 
             "target_height", "test_sample_size", "output_video", "test_output_video",
             "auto_clean_crops", "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id",
-            "stage_interval_seconds", "ntfy_topic"
+            "youtube_custom_tags", "stage_interval_seconds", "ntfy_topic"
         ]
         save_dict = {k: config[k] for k in keys_to_save if k in config}
         with open(config_path, "w", encoding="utf-8") as f:
@@ -172,6 +187,75 @@ def sanitize_path(path_str):
     cleaned = path_str.strip().strip("'\"")
     cleaned = os.path.expanduser(cleaned)
     return os.path.normpath(cleaned)
+
+def resolve_custom_video_path(custom_path):
+    """
+    Resolve e valida o caminho de um vídeo fornecido pelo usuário.
+    Suporta:
+      - Caminho direto para o arquivo .mp4 (com ou sem aspas)
+      - Caminho sem extensão .mp4 (se existir nome.mp4)
+      - Caminho para uma pasta (detecta arquivos .mp4 dentro dela automaticamente)
+    Retorna o caminho absoluto do arquivo .mp4 selecionado ou None se cancelado/não encontrado.
+    """
+    if not custom_path:
+        return None
+        
+    cleaned = sanitize_path(custom_path)
+    if not cleaned:
+        return None
+
+    # Se o caminho não existe diretamente, tenta com a extensão .mp4
+    if not os.path.exists(cleaned) and os.path.exists(cleaned + ".mp4"):
+        cleaned = cleaned + ".mp4"
+
+    if not os.path.exists(cleaned):
+        print(f"[-] Caminho '{cleaned}' não foi encontrado no disco.")
+        return None
+
+    # Se for uma pasta, procurar vídeos .mp4 dentro dela
+    if os.path.isdir(cleaned):
+        dir_name = os.path.basename(cleaned) or cleaned
+        print(f"\n[*] Pasta informada: '{dir_name}'")
+        print("[*] Buscando arquivos de vídeo .mp4...")
+        
+        # Busca primeiro na raiz da pasta informada
+        mp4_files = sorted(glob.glob(os.path.join(cleaned, "*.mp4")))
+        # Se não encontrar na raiz, busca recursivamente nas subpastas
+        if not mp4_files:
+            mp4_files = sorted(glob.glob(os.path.join(cleaned, "**", "*.mp4"), recursive=True))
+
+        if not mp4_files:
+            print(f"[-] Nenhum arquivo .mp4 foi encontrado dentro da pasta '{cleaned}'.")
+            return None
+        elif len(mp4_files) == 1:
+            selected = os.path.abspath(mp4_files[0])
+            sz = os.path.getsize(selected) / (1024 * 1024)
+            print(f"[+] Vídeo .mp4 detectado automaticamente:")
+            print(f"    • {os.path.basename(selected)} ({sz:.2f} MB)")
+            return selected
+        else:
+            print("\n" + "=" * 66)
+            print(f"     VÍDEOS .MP4 ENCONTRADOS NA PASTA ({len(mp4_files)} vídeos)")
+            print("=" * 66)
+            for idx, vf in enumerate(mp4_files, 1):
+                sz = os.path.getsize(vf) / (1024 * 1024)
+                rel = os.path.relpath(vf, cleaned)
+                print(f"  [{idx}] {rel} ({sz:.2f} MB)")
+            print("  [0] Digitar outro caminho / Cancelar")
+            print("-" * 66)
+            choice = input(f"Escolha o vídeo para upload [1-{len(mp4_files)}]: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(mp4_files):
+                selected = os.path.abspath(mp4_files[int(choice) - 1])
+                print(f"[+] Vídeo selecionado: {os.path.basename(selected)}")
+                return selected
+            return None
+
+    # Se for um arquivo regular
+    if os.path.isfile(cleaned):
+        return os.path.abspath(cleaned)
+    else:
+        print(f"[-] O caminho '{cleaned}' não é um arquivo regular.")
+        return None
 
 def get_output_dir(config):
     """
@@ -318,6 +402,216 @@ def get_exif_timestamp(img_path):
     """Extrai a data/hora original da foto via cabeçalhos EXIF (suporta GoPro, Canon, etc.)."""
     dt = get_exif_datetime(img_path)
     return dt.strftime('%Y-%m-%d_%H-%M-%S')
+
+def get_photo_camera_info(img_path):
+    """
+    Extrai modelo da câmera e dimensões originais da foto via EXIF.
+    Retorna dicionário com 'camera', 'original_width', 'original_height'.
+    """
+    info = {"camera": None, "original_width": None, "original_height": None}
+    if not img_path or not os.path.exists(img_path):
+        return info
+    try:
+        with Image.open(img_path) as img:
+            info["original_width"] = img.width
+            info["original_height"] = img.height
+            exif = img._getexif()
+            if exif:
+                # 271: Make, 272: Model
+                make = str(exif.get(271, "")).strip() if exif.get(271) else ""
+                model = str(exif.get(272, "")).strip() if exif.get(272) else ""
+                if make and model:
+                    if make.lower() in model.lower():
+                        camera_str = model
+                    else:
+                        camera_str = f"{make} {model}"
+                elif model:
+                    camera_str = model
+                elif make:
+                    camera_str = make
+                else:
+                    camera_str = None
+                info["camera"] = camera_str
+    except Exception:
+        pass
+    return info
+
+def parse_datetime_from_video_filename(filename):
+    """
+    Tenta extrair datas/horas do nome do vídeo gerado pelo Timelapse Studio.
+    Suporta:
+      timelapse_YYYY-MM-DD_HH-MM---HH-MM.mp4
+      timelapse_YYYY-MM-DD_HH-MM---YYYY-MM-DD_HH-MM.mp4
+    """
+    base = os.path.basename(filename).replace(".mp4", "")
+    if "---" in base:
+        try:
+            parts = base.split("---")
+            part1 = parts[0]
+            part2 = parts[1]
+            
+            tokens1 = part1.split("_")
+            date1_str = None
+            time1_str = None
+            for i, t in enumerate(tokens1):
+                if len(t) == 10 and t.count("-") == 2:
+                    date1_str = t
+                    if i + 1 < len(tokens1):
+                        time1_str = tokens1[i + 1]
+                    break
+                    
+            date2_str = date1_str
+            time2_str = None
+            tokens2 = part2.split("_")
+            for i, t in enumerate(tokens2):
+                if len(t) == 10 and t.count("-") == 2:
+                    date2_str = t
+                    if i + 1 < len(tokens2):
+                        time2_str = tokens2[i + 1]
+                    break
+                elif len(t) == 5 and t.count("-") == 1:
+                    time2_str = t
+                    break
+                    
+            if date1_str and time1_str:
+                dt1 = datetime.datetime.strptime(f"{date1_str}_{time1_str}", "%Y-%m-%d_%H-%M")
+                if date2_str and time2_str:
+                    dt2 = datetime.datetime.strptime(f"{date2_str}_{time2_str}", "%Y-%m-%d_%H-%M")
+                else:
+                    dt2 = dt1
+                return dt1, dt2
+        except Exception:
+            pass
+    return None, None
+
+_GEOCODE_CACHE = {}
+
+def get_photo_gps_coordinates(img_path):
+    """
+    Extrai coordenadas GPS (latitude, longitude, altitude) dos metadados EXIF da foto.
+    Retorna dicionário com {'latitude': float, 'longitude': float, 'altitude': float} ou None.
+    """
+    if not img_path or not os.path.exists(img_path):
+        return None
+    try:
+        with Image.open(img_path) as img:
+            exif = img._getexif()
+            if not exif:
+                return None
+                
+            # Tag 34853 = GPSInfo
+            gps_info = exif.get(34853) or exif.get(0x8825)
+            if not gps_info or not isinstance(gps_info, dict):
+                return None
+                
+            def _to_float(val):
+                if isinstance(val, (tuple, list)):
+                    return float(val[0]) / float(val[1]) if len(val) == 2 and val[1] != 0 else float(val[0])
+                if hasattr(val, 'numerator') and hasattr(val, 'denominator'):
+                    return float(val.numerator) / float(val.denominator) if val.denominator != 0 else float(val.numerator)
+                return float(val)
+
+            def _convert_dms_to_dd(dms, ref):
+                if not dms or len(dms) < 3:
+                    return None
+                d = _to_float(dms[0])
+                m = _to_float(dms[1])
+                s = _to_float(dms[2])
+                dd = d + (m / 60.0) + (s / 3600.0)
+                if ref in ['S', 'W', 's', 'w']:
+                    dd = -dd
+                return dd
+
+            lat_dms = gps_info.get(2) # GPSLatitude
+            lat_ref = gps_info.get(1, 'N') # GPSLatitudeRef
+            lon_dms = gps_info.get(4) # GPSLongitude
+            lon_ref = gps_info.get(3, 'E') # GPSLongitudeRef
+            alt_val = gps_info.get(6) # GPSAltitude
+            alt_ref = gps_info.get(5, 0) # GPSAltitudeRef (0 = above sea level, 1 = below)
+
+            if lat_dms and lon_dms:
+                latitude = _convert_dms_to_dd(lat_dms, lat_ref)
+                longitude = _convert_dms_to_dd(lon_dms, lon_ref)
+                altitude = None
+                if alt_val is not None:
+                    try:
+                        altitude = _to_float(alt_val)
+                        if alt_ref == 1:
+                            altitude = -altitude
+                    except Exception:
+                        altitude = None
+
+                if latitude is not None and longitude is not None:
+                    return {
+                        "latitude": round(latitude, 6),
+                        "longitude": round(longitude, 6),
+                        "altitude": round(altitude, 1) if altitude is not None else None
+                    }
+    except Exception:
+        pass
+    return None
+
+def reverse_geocode_coordinates(latitude, longitude, timeout=4.0):
+    """
+    Realiza o geocoding reverso das coordenadas (lat, lon) usando a API pública OpenStreetMap (Nominatim).
+    Retorna dicionário com: city, state, country, formatted_address, display_name.
+    """
+    key = (round(latitude, 4), round(longitude, 4))
+    if key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[key]
+        
+    url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={latitude}&lon={longitude}&zoom=14&addressdetails=1"
+    headers = {
+        "User-Agent": "TimelapseStudio4K/1.0 (Photography Automation Tool)"
+    }
+    
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode('utf-8'))
+                address = data.get("address", {})
+                
+                # Extrair cidade / município
+                city = (
+                    address.get("city") or 
+                    address.get("town") or 
+                    address.get("municipality") or 
+                    address.get("village") or 
+                    address.get("suburb") or 
+                    address.get("county") or ""
+                )
+                
+                # Extrair estado
+                state = address.get("state") or address.get("region") or ""
+                
+                # Extrair país
+                country = address.get("country") or ""
+                
+                parts = [p for p in [city, state, country] if p]
+                formatted = ", ".join(parts) if parts else data.get("display_name", "")
+                
+                result = {
+                    "city": city,
+                    "state": state,
+                    "country": country,
+                    "formatted_address": formatted,
+                    "display_name": data.get("display_name", "")
+                }
+                _GEOCODE_CACHE[key] = result
+                return result
+    except Exception:
+        pass
+        
+    fallback = {
+        "city": "",
+        "state": "",
+        "country": "",
+        "formatted_address": f"{latitude:.5f}, {longitude:.5f}",
+        "display_name": ""
+    }
+    _GEOCODE_CACHE[key] = fallback
+    return fallback
 
 def format_photo_name(img_path, dt=None):
     """
@@ -1122,42 +1416,522 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
         logger.log_event(project_id, "etapa_4_clean", f"Erro ao remover '{output_dir}': {e}", level="ERROR")
         return False
 
-def run_step_5_youtube_upload(config, video_path=None, project_id=None):
+def build_youtube_metadata(video_path, config, project_id=None):
     """
-    Etapa 5: Publicação oficial de vídeo no YouTube via YouTube Data API v3.
+    Compila os metadados ricos para o YouTube (Título Opção B, Descrição Detalhada, Tags Dinâmicas).
+    Retorna um dicionário com: title, description, tags, privacy_status, category_id.
     """
     source_dir = config.get("source_dir", ".")
     if not project_id:
         project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
         
-    # Evitar retrabalho: se o vídeo deste projeto já foi enviado para o YouTube
-    existing_stage5 = tracker.get_stage_info(project_id, "etapa_5")
-    if existing_stage5.get("status") == "completed" and existing_stage5.get("youtube_url"):
-        existing_url = existing_stage5["youtube_url"]
-        print("\n" + "=" * 66)
-        print("          ETAPA 5: PUBLICAÇÃO DE VÍDEO NO YOUTUBE")
-        print("=" * 66)
-        print(f"[i] O vídeo deste projeto já foi publicado anteriormente no YouTube:")
-        print(f"    🔗 {existing_url}")
-        print("[+] Upload ignorado para evitar envio de vídeos duplicados no canal.")
-        print("=" * 66)
-        return True, existing_url
+    fps = config.get("fps", 60)
+    fpi = max(1, config.get("frames_per_image", 1))
+    target_w = config.get("target_width", 3840)
+    target_h = config.get("target_height", 2160)
+    crf = config.get("crf", 15)
+    preset = config.get("preset", "ultrafast")
+    crop_mode = config.get("crop_mode", "center")
+    crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode.capitalize())
+    privacy = config.get("youtube_privacy_status", "unlisted")
+    category = config.get("youtube_category_id", "22")
+    
+    # 1. Obter fotos da pasta de origem para extrair dados ricos
+    photos = find_all_photos(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    
+    # Se a pasta de origem configurada não tem fotos, mas temos o vídeo, buscar fotos na pasta do próprio vídeo
+    if not photos and video_path and os.path.exists(video_path):
+        video_dir = os.path.dirname(os.path.abspath(video_path))
+        if os.path.isdir(video_dir):
+            candidate_photos = find_all_photos(video_dir, config.get("output_dir", "fotos_cortadas_4k"))
+            if candidate_photos:
+                photos = candidate_photos
 
-    if not video_path:
-        video_files = glob.glob(os.path.join(source_dir, "*.mp4"))
+    first_dt = None
+    last_dt = None
+    total_photos = len(photos) if photos else 0
+    cam_info = {"camera": None, "original_width": None, "original_height": None}
+    gps_info = None
+    geo_info = None
+    
+    if photos:
+        first_dt = get_exif_datetime(photos[0])
+        last_dt = get_exif_datetime(photos[-1])
+        cam_info = get_photo_camera_info(photos[0])
+        # Tenta obter GPS da primeira foto ou das primeiras 5 fotos (caso o lock tenha levado alguns segundos)
+        for p in photos[:5]:
+            gps_info = get_photo_gps_coordinates(p)
+            if gps_info:
+                break
+
+    # Se as fotos não tinham datas ou não havia fotos, tenta extrair datas do nome do vídeo
+    if (not first_dt or not last_dt) and video_path:
+        v_first, v_last = parse_datetime_from_video_filename(video_path)
+        if not first_dt:
+            first_dt = v_first
+        if not last_dt:
+            last_dt = v_last
+
+    # Obter geocoding reverso se coordenadas GPS foram encontradas
+    location_payload = None
+    if gps_info:
+        geo_info = reverse_geocode_coordinates(gps_info["latitude"], gps_info["longitude"])
+        loc_desc = geo_info.get("formatted_address") or f"{gps_info['latitude']:.4f}, {gps_info['longitude']:.4f}"
+        location_payload = {
+            "latitude": gps_info["latitude"],
+            "longitude": gps_info["longitude"],
+            "altitude": gps_info.get("altitude"),
+            "location_description": loc_desc
+        }
+
+    # 2. Montar Título (Padrão Opção B: YYYY-MM-DD (HH:MM - HH:MM) - Timelapse 4K UHD)
+    if first_dt and last_dt:
+        d1_str = first_dt.strftime('%Y-%m-%d')
+        d2_str = last_dt.strftime('%Y-%m-%d')
+        t1_str = first_dt.strftime('%H:%M')
+        t2_str = last_dt.strftime('%H:%M')
+        
+        if d1_str == d2_str:
+            title = f"{d1_str} ({t1_str} - {t2_str}) - Timelapse 4K UHD"
+        else:
+            title = f"{d1_str} a {d2_str} ({t1_str} - {t2_str}) - Timelapse 4K UHD"
+    elif first_dt:
+        d1_str = first_dt.strftime('%Y-%m-%d')
+        t1_str = first_dt.strftime('%H:%M')
+        title = f"{d1_str} ({t1_str}) - Timelapse 4K UHD"
+    else:
+        now_dt = datetime.datetime.now()
+        title = f"{now_dt.strftime('%Y-%m-%d')} - Timelapse 4K UHD"
+        
+    title = title[:100]
+
+    # 3. Métricas de Duração e Compressão
+    real_dur_str = "Não disponível"
+    video_dur_str = "Não disponível"
+    speedup_str = None
+    interval_str = None
+    
+    if first_dt and last_dt:
+        real_sec = max(0, int((last_dt - first_dt).total_seconds()))
+        rh = real_sec // 3600
+        rm = (real_sec % 3600) // 60
+        rs = real_sec % 60
+        if rh > 0:
+            real_dur_str = f"{rh}h {rm:02d}m" if rm > 0 else f"{rh}h"
+        elif rm > 0:
+            real_dur_str = f"{rm}m {rs:02d}s"
+        else:
+            real_dur_str = f"{rs}s"
+            
+        if total_photos > 0:
+            total_frames = total_photos * fpi
+            vid_sec = total_frames / fps if fps > 0 else 0
+            vm = int(vid_sec // 60)
+            vs = int(vid_sec % 60)
+            video_dur_str = f"{vm}:{vs:02d} min ({vid_sec:.1f}s)" if vm > 0 else f"{vid_sec:.1f}s"
+            
+            if vid_sec > 0 and real_sec > 0:
+                speedup = real_sec / vid_sec
+                speedup_str = f"comprimido ~{speedup:.0f}x mais rápido que o tempo real"
+                
+            if total_photos > 1 and real_sec > 0:
+                avg_interval = real_sec / (total_photos - 1)
+                interval_str = f"1 foto a cada ~{avg_interval:.1f}s"
+
+    # 4. Montar Descrição Rica
+    now_str = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+    lines = [
+        f"Vídeo timelapse gravado e renderizado em resolução 4K Ultra HD ({target_w}x{target_h}) a {fps} FPS.",
+        "",
+        "📅 DETALHES DA CAPTURA"
+    ]
+    
+    if first_dt and last_dt:
+        d_rec = first_dt.strftime('%d/%m/%Y')
+        if first_dt.date() != last_dt.date():
+            d_rec += f" a {last_dt.strftime('%d/%m/%Y')}"
+        lines.append(f"• Data da Gravação: {d_rec}")
+        lines.append(f"• Horário: {first_dt.strftime('%H:%M:%S')} às {last_dt.strftime('%H:%M:%S')} (Início ao Fim)")
+        lines.append(f"• Duração no Mundo Real: {real_dur_str}")
+    elif first_dt:
+        lines.append(f"• Data da Gravação: {first_dt.strftime('%d/%m/%Y')}")
+        lines.append(f"• Horário de Início: {first_dt.strftime('%H:%M:%S')}")
+        
+    if total_photos > 0:
+        dur_line = f"• Duração do Vídeo: {video_dur_str}"
+        if speedup_str:
+            dur_line += f" ({speedup_str})"
+        lines.append(dur_line)
+        if interval_str:
+            lines.append(f"• Intervalo Médio: {interval_str}")
+        lines.append(f"• Total de Fotos: {total_photos:,}".replace(",", "."))
+
+    # Seção Localização & GPS
+    if gps_info:
+        lines.append("")
+        lines.append("📍 LOCALIZAÇÃO & GEOLOCALIZAÇÃO")
+        if geo_info and geo_info.get("formatted_address"):
+            lines.append(f"• Local: {geo_info['formatted_address']}")
+        alt_str = f" (Altitude: {gps_info['altitude']:.1f}m)" if gps_info.get("altitude") is not None else ""
+        lines.append(f"• Coordenadas GPS: {gps_info['latitude']:.6f}, {gps_info['longitude']:.6f}{alt_str}")
+        lines.append(f"• Google Maps: https://www.google.com/maps?q={gps_info['latitude']:.6f},{gps_info['longitude']:.6f}")
+        
+    # Seção Equipamento
+    lines.append("")
+    lines.append("📷 EQUIPAMENTO & EXIF")
+    if cam_info.get("camera"):
+        lines.append(f"• Câmera: {cam_info['camera']}")
+    else:
+        lines.append("• Câmera: Câmera Digital / Action Cam")
+        
+    if cam_info.get("original_width") and cam_info.get("original_height"):
+        lines.append(f"• Resolução Original: {cam_info['original_width']}x{cam_info['original_height']} ➔ {target_w}x{target_h} (16:9)")
+    else:
+        lines.append(f"• Enquadramento Alvo: {target_w}x{target_h} (Proporção 16:9)")
+
+    # Seção Especificações Técnicas
+    lines.append("")
+    lines.append("⚙️ ESPECIFICAÇÕES TÉCNICAS")
+    lines.append(f"• Resolução Final: {target_w}x{target_h} (4K UHD - 2160p)")
+    lines.append(f"• Taxa de Quadros: {fps} FPS ({fpi} frame(s) por foto)")
+    lines.append(f"• Enquadramento: Recorte {crop_label} 16:9 (LANCZOS)")
+    lines.append(f"• Qualidade / CRF: CRF {crf} (Máxima fidelidade visual)")
+    lines.append(f"• Preset FFmpeg: {preset}")
+    lines.append("• Espaço de Cor: BT.709 / YUV420p (Padrão Oficial 4K)")
+    lines.append("• Software: Timelapse Studio 4K UHD (PIL Multiprocessing + FFmpeg)")
+
+    # Seção Projeto
+    lines.append("")
+    lines.append("🆔 PROJETO & SISTEMA")
+    lines.append(f"• ID do Projeto: {project_id}")
+    lines.append(f"• Renderizado em: {now_str}")
+    lines.append("")
+    lines.append("──────────────────────────────────────")
+    lines.append("#Timelapse #4KUHD #4KTimelapse #UltraHD #Photography #TimeLapseStudio #60FPS")
+    
+    description = "\n".join(lines)[:5000]
+
+    # 5. Tags Inteligentes
+    tags = ["timelapse", "timelapse 4k", "4k uhd", "60fps timelapse", "ultra hd", "timelapse studio", "photography", "hyperlapse", "4k"]
+    if first_dt:
+        tags.append(f"timelapse {first_dt.year}")
+        tags.append(first_dt.strftime('%Y-%m-%d'))
+    if cam_info.get("camera"):
+        cam_tag = cam_info["camera"].lower()
+        if cam_tag not in tags:
+            tags.append(cam_tag)
+            
+    # Adicionar tags de localização se encontradas
+    if geo_info:
+        for entity in [geo_info.get("city"), geo_info.get("state"), geo_info.get("country")]:
+            if entity:
+                ent_clean = str(entity).strip().lower()
+                if ent_clean and ent_clean not in tags:
+                    tags.append(ent_clean)
+                    
+    tags.extend([f"{target_w}x{target_h}", "2160p", f"{fps}fps"])
+    
+    # Custom tags de config
+    custom_tags = config.get("youtube_custom_tags", [])
+    if isinstance(custom_tags, list):
+        for ct in custom_tags:
+            ct_clean = str(ct).strip().lower()
+            if ct_clean and ct_clean not in tags:
+                tags.append(ct_clean)
+                
+    # Remover duplicatas preservando ordem
+    unique_tags = []
+    for t in tags:
+        if t and t not in unique_tags:
+            unique_tags.append(t)
+
+    recording_date_iso = first_dt.strftime('%Y-%m-%dT%H:%M:%S.000Z') if first_dt else None
+
+    return {
+        "title": title,
+        "description": description,
+        "tags": unique_tags,
+        "privacy_status": privacy,
+        "category_id": str(category),
+        "location": location_payload,
+        "recording_date": recording_date_iso
+    }
+
+def display_youtube_metadata_card(metadata, video_path):
+    """Exibe o card visual de pré-visualização dos metadados formatados."""
+    file_size_mb = os.path.getsize(video_path) / (1024 * 1024) if os.path.exists(video_path) else 0
+    title = metadata.get("title", "")
+    desc = metadata.get("description", "")
+    tags = metadata.get("tags", [])
+    privacy = metadata.get("privacy_status", "unlisted").upper()
+    category = metadata.get("category_id", "22")
+    loc_data = metadata.get("location")
+    
+    print("\n" + "=" * 66)
+    print("      📺 PRÉ-VISUALIZAÇÃO DE PUBLICAÇÃO NO YOUTUBE (API OFICIAL)")
+    print("=" * 66)
+    print(f" Arquivo    : {os.path.basename(video_path)} ({file_size_mb:.2f} MB)")
+    print(f" Privacidade: {privacy} | Categoria: {category} (People & Blogs)")
+    if loc_data:
+        loc_desc = loc_data.get("location_description", "")
+        lat = loc_data.get("latitude")
+        lon = loc_data.get("longitude")
+        alt = loc_data.get("altitude")
+        alt_str = f" | Alt: {alt:.1f}m" if alt is not None else ""
+        print(f" 📍 Local    : {loc_desc} ({lat:.4f}, {lon:.4f}{alt_str})")
+    print("-" * 66)
+    print(f" 🏷️  TÍTULO ({len(title)}/100 car.):")
+    print(f"    {title}")
+    print("-" * 66)
+    print(" 📝 DESCRIÇÃO:")
+    for line in desc.splitlines():
+        print(f"    {line}")
+    print("-" * 66)
+    tags_str = ", ".join(tags)
+    if len(tags_str) > 60:
+        tags_display = tags_str[:57] + "..."
+    else:
+        tags_display = tags_str
+    print(f" 🏷️  TAGS ({len(tags)} tags): {tags_display}")
+    print("=" * 66)
+
+def preview_and_confirm_youtube_metadata(metadata, video_path, interval_seconds=180, non_interactive=False):
+    """
+    Exibe a tela de pré-visualização de metadados do YouTube com contagem regressiva
+    para publicação automática se não for interrompida.
+    
+    Atalhos:
+      [ENTER] / [ESPAÇO] : Enviar imediatamente
+      [E]                : Editar metadados (Título, Descrição, Tags, Privacidade, Localização)
+      [P]                : Pausar / Retomar contagem
+      [C] / [Q] / [ESC]  : Cancelar envio
+    """
+    if non_interactive or interval_seconds <= 0:
+        display_youtube_metadata_card(metadata, video_path)
+        print("[+] Prosseguindo com o envio para o YouTube...")
+        return True, metadata
+
+    current_meta = dict(metadata)
+    
+    msvcrt = None
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
+
+    while True:
+        display_youtube_metadata_card(current_meta, video_path)
+        print(f" ⏱️  Envio automático em: {interval_seconds}s ({interval_seconds/60:.1f} min) se não houver interação")
+        print(" [ENTER/ESPAÇO] Enviar Agora | [E] Editar | [P] Pausar | [C/Q] Cancelar")
+        print("-" * 66)
+        
+        remaining = interval_seconds
+        paused = False
+        action = None
+        
+        while remaining > 0 or paused:
+            if msvcrt and msvcrt.kbhit():
+                ch = msvcrt.getch()
+                try:
+                    ch_str = ch.decode('utf-8', errors='ignore').lower()
+                except Exception:
+                    ch_str = ""
+                    
+                if ch in [b'\r', b'\n', b' ']:
+                    sys.stdout.write(f"\r[+] Avançando imediatamente para o upload no YouTube!          \n")
+                    sys.stdout.flush()
+                    return True, current_meta
+                elif ch_str in ['e', 'E']:
+                    action = "edit"
+                    break
+                elif ch_str in ['p', 'P']:
+                    paused = not paused
+                    if paused:
+                        sys.stdout.write(f"\r⏸️  CONTAGEM PAUSADA! Pressione [P] ou [ENTER] para retomar...   ")
+                        sys.stdout.flush()
+                    else:
+                        sys.stdout.write(f"\r▶️  Contagem retomada! Continuando...                             \n")
+                        sys.stdout.flush()
+                elif ch_str in ['c', 'C', 'q', 'Q', '\x1b']:
+                    sys.stdout.write(f"\n[!] Upload no YouTube cancelado pelo usuário.\n")
+                    sys.stdout.flush()
+                    return False, None
+
+            if not paused:
+                mins, secs = divmod(remaining, 60)
+                sys.stdout.write(f"\r⏳ Envio automático em {mins:02d}:{secs:02d} | [ENTER] Enviar Já | [E] Editar | [P] Pausa | [C] Cancelar... ")
+                sys.stdout.flush()
+                time.sleep(1.0)
+                remaining -= 1
+            else:
+                time.sleep(0.5)
+                
+        if action == "edit":
+            print("\n")
+            print("=" * 66)
+            print("             EDIÇÃO RÁPIDA DE METADADOS DO YOUTUBE")
+            print("=" * 66)
+            print("  [1] Editar Título")
+            print("  [2] Editar Descrição")
+            print("  [3] Adicionar / Alterar Tags")
+            print("  [4] Alterar Privacidade (unlisted / public / private)")
+            print("  [5] Editar / Inserir Nome da Localização")
+            print("  [0] Concluir Edições e Retornar ao Preview")
+            print("-" * 66)
+            sub_choice = input("Escolha o campo para editar [0-5]: ").strip()
+            if sub_choice == "1":
+                print(f"\nTítulo atual: {current_meta['title']}")
+                new_title = input("Novo Título (ou Enter para manter): ").strip()
+                if new_title:
+                    current_meta["title"] = new_title[:100]
+                    print(f"[+] Título atualizado ({len(current_meta['title'])} car.)")
+            elif sub_choice == "2":
+                print(f"\nDescrição atual:\n{current_meta['description']}\n")
+                print("Digite a nova descrição (deixe em branco para manter):")
+                new_desc = input("Nova Descrição: ").strip()
+                if new_desc:
+                    current_meta["description"] = new_desc[:5000]
+                    print("[+] Descrição atualizada.")
+            elif sub_choice == "3":
+                print(f"\nTags atuais: {', '.join(current_meta['tags'])}")
+                new_tags_input = input("Digite novas tags separadas por vírgula (ou Enter para manter): ").strip()
+                if new_tags_input:
+                    new_tags = [t.strip() for t in new_tags_input.split(",") if t.strip()]
+                    if new_tags:
+                        current_meta["tags"] = new_tags
+                        print(f"[+] Tags atualizadas: {len(new_tags)} tags definidas.")
+            elif sub_choice == "4":
+                print(f"\nPrivacidade atual: {current_meta['privacy_status']}")
+                print("  [1] unlisted (Não listado)")
+                print("  [2] private  (Privado)")
+                print("  [3] public   (Público)")
+                p_opt = input("Escolha [1/2/3]: ").strip()
+                if p_opt == "1":
+                    current_meta["privacy_status"] = "unlisted"
+                elif p_opt == "2":
+                    current_meta["privacy_status"] = "private"
+                elif p_opt == "3":
+                    current_meta["privacy_status"] = "public"
+                print(f"[+] Privacidade definida para: {current_meta['privacy_status']}")
+            elif sub_choice == "5":
+                cur_loc = current_meta.get("location") or {}
+                cur_desc = cur_loc.get("location_description", "")
+                print(f"\nLocalização atual: {cur_desc or 'Nenhuma'}")
+                new_loc_desc = input("Novo nome do local / cidade (ou Enter para manter): ").strip()
+                if new_loc_desc:
+                    if not current_meta.get("location"):
+                        current_meta["location"] = {}
+                    current_meta["location"]["location_description"] = new_loc_desc
+                    print(f"[+] Localização definida para: {new_loc_desc}")
+            
+            # Após editar, retorna para o loop do preview com o tempo reiniciado
+            continue
+
+        # Se o loop de contagem zerou sem intervenção do usuário
+        if remaining <= 0 and not paused:
+            sys.stdout.write(f"\r[+] Tempo esgotado! Iniciando upload automático para o YouTube...     \n")
+            sys.stdout.flush()
+            return True, current_meta
+
+def confirm_reupload_with_countdown(seconds=180):
+    """
+    Solicita confirmação para reenviar um vídeo já publicado anteriormente no YouTube
+    com contagem regressiva interativa (padrão: 180 segundos).
+    Se o usuário não responder dentro do tempo limite, assume automaticamente 'NÃO' (upload cancelado).
+    
+    Teclas:
+      [S] / [Y]                         : Confirmar reenvio
+      [N] / [C] / [Q] / [ENTER] / [ESC] : Cancelar reenvio (ou após 180s esgotados)
+    """
+    msvcrt = None
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
+
+    print("⚠️  Deseja reenviar o vídeo para o YouTube novamente?")
+    print("    [S] Sim (Reenviar) | [N/ENTER] Não (Cancelar)")
+    print(f"    (Tempo limite: {seconds}s | Se não houver resposta a tempo, será considerado NÃO)")
+    print("-" * 66)
+
+    remaining = seconds
+    start_time = time.time()
+
+    if msvcrt:
+        # Limpa qualquer tecla pendente no buffer
+        while msvcrt.kbhit():
+            msvcrt.getch()
+
+        while remaining > 0:
+            mins, secs = divmod(remaining, 60)
+            sys.stdout.write(f"\r⏳ Tempo restante: {mins:02d}:{secs:02d} | Escolha [S] Sim ou [N] Não: ")
+            sys.stdout.flush()
+
+            for _ in range(10):
+                if msvcrt.kbhit():
+                    ch = msvcrt.getch()
+                    try:
+                        ch_str = ch.decode('utf-8', errors='ignore').lower()
+                    except Exception:
+                        ch_str = ""
+
+                    if ch_str in ['s', 'y']:
+                        sys.stdout.write(f"\r[+] Resposta: SIM. Prosseguindo com o reenvio para o YouTube!              \n")
+                        sys.stdout.flush()
+                        return True
+                    elif ch_str in ['n', 'c', 'q'] or ch in [b'\r', b'\n', b'\x1b']:
+                        sys.stdout.write(f"\r[-] Resposta: NÃO. Envio cancelado a pedido do usuário.                    \n")
+                        sys.stdout.flush()
+                        return False
+
+                time.sleep(0.1)
+
+            elapsed = int(time.time() - start_time)
+            remaining = max(0, seconds - elapsed)
+
+        sys.stdout.write(f"\r[!] Tempo esgotado ({seconds}s)! Resposta considerada: NÃO (Upload cancelado).      \n")
+        sys.stdout.flush()
+        return False
+    else:
+        try:
+            import select
+            sys.stdout.write(f"Escolha [s/N] (Tempo limite {seconds}s): ")
+            sys.stdout.flush()
+            rlist, _, _ = select.select([sys.stdin], [], [], seconds)
+            if rlist:
+                ans = sys.stdin.readline().strip().lower()
+                return ans in ["s", "sim", "y", "yes"]
+            else:
+                print(f"\n[!] Tempo esgotado ({seconds}s)! Resposta considerada: NÃO.")
+                return False
+        except Exception:
+            ans = input(f"Escolha [s/N] (Enter para Não): ").strip().lower()
+            return ans in ["s", "sim", "y", "yes"]
+
+def run_step_5_youtube_upload(config, video_path=None, project_id=None, non_interactive=False):
+    """
+    Etapa 5: Publicação oficial de vídeo no YouTube com metadados ricos, preview interativo e auto-envio.
+    """
+    source_dir = config.get("source_dir", ".")
+    if not project_id:
+        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+
+    while not video_path:
+        video_files = sorted(glob.glob(os.path.join(source_dir, "*.mp4")))
         if not video_files:
             print(f"\n[-] Nenhum vídeo .mp4 encontrado na pasta de origem '{os.path.abspath(source_dir)}'.")
-            custom_path = input("Digite ou arraste o caminho do arquivo .mp4 para upload (ou Enter para cancelar): ").strip()
+            custom_path = input("Digite ou arraste o arquivo .mp4 ou a pasta com o vídeo (ou Enter para cancelar): ").strip()
             if not custom_path:
                 print("[+] Upload cancelado.")
                 return False, None
-            cleaned = sanitize_path(custom_path)
-            if not os.path.exists(cleaned):
-                print(f"[-] Arquivo '{cleaned}' não encontrado.")
-                return False, None
-            video_path = cleaned
+            resolved = resolve_custom_video_path(custom_path)
+            if not resolved:
+                continue
+            video_path = resolved
         elif len(video_files) == 1:
-            video_path = video_files[0]
+            video_path = os.path.abspath(video_files[0])
             print(f"\n[+] Vídeo selecionado: {os.path.basename(video_path)}")
         else:
             print("\n" + "=" * 66)
@@ -1170,45 +1944,75 @@ def run_step_5_youtube_upload(config, video_path=None, project_id=None):
             print("-" * 66)
             vchoice = input(f"Escolha o vídeo para upload [1-{len(video_files)}]: ").strip()
             if vchoice.isdigit() and 1 <= int(vchoice) <= len(video_files):
-                video_path = video_files[int(vchoice) - 1]
+                video_path = os.path.abspath(video_files[int(vchoice) - 1])
             else:
-                custom_path = input("Digite ou arraste o caminho do arquivo .mp4 (ou Enter para cancelar): ").strip()
+                custom_path = input("Digite ou arraste o arquivo .mp4 ou a pasta com o vídeo (ou Enter para cancelar): ").strip()
                 if not custom_path:
                     print("[+] Upload cancelado.")
                     return False, None
-                cleaned = sanitize_path(custom_path)
-                if not os.path.exists(cleaned):
-                    print(f"[-] Arquivo '{cleaned}' não encontrado.")
-                    return False, None
-                video_path = cleaned
+                resolved = resolve_custom_video_path(custom_path)
+                if not resolved:
+                    continue
+                video_path = resolved
 
-    base_name = os.path.basename(video_path)
-    title = f"Timelapse 4K UHD - {base_name.replace('.mp4', '')}"
-    fps = config.get("fps", 60)
-    res = f"{config.get('target_width', 3840)}x{config.get('target_height', 2160)}"
-    privacy = config.get("youtube_privacy_status", "unlisted")
-    category = config.get("youtube_category_id", "22")
+    # Validação de integridade do arquivo
+    if not os.path.isfile(video_path):
+        print(f"[-] O caminho selecionado '{video_path}' não é um arquivo regular.")
+        return False, None
+
+    # Se a pasta de origem não continha fotos, derivar o project_id com base na pasta do vídeo
+    video_dir = os.path.dirname(os.path.abspath(video_path))
+    if os.path.isdir(video_dir):
+        if not find_all_photos(source_dir, config.get("output_dir", "fotos_cortadas_4k")):
+            derived_pid = logger.get_project_id(video_dir, config.get("output_dir", "fotos_cortadas_4k"))
+            if derived_pid:
+                project_id = derived_pid
+
+    # Evitar retrabalho acidental: se o vídeo deste projeto já foi enviado para o YouTube
+    existing_stage5 = tracker.get_stage_info(project_id, "etapa_5")
+    if existing_stage5.get("status") == "completed" and existing_stage5.get("youtube_url"):
+        existing_url = existing_stage5["youtube_url"]
+        print("\n" + "=" * 66)
+        print("          ETAPA 5: PUBLICAÇÃO DE VÍDEO NO YOUTUBE")
+        print("=" * 66)
+        print(f"[i] O vídeo deste projeto já foi publicado anteriormente no YouTube:")
+        print(f"    🔗 {existing_url}")
+        print("-" * 66)
+        if non_interactive:
+            print("[+] Modo não-interativo: upload ignorado para evitar duplicação.")
+            print("=" * 66)
+            return True, existing_url
+            
+        interval_s = config.get("stage_interval_seconds", 180)
+        reupload_confirmed = confirm_reupload_with_countdown(seconds=interval_s)
+        if not reupload_confirmed:
+            print("=" * 66)
+            return True, existing_url
+            
+        print("=" * 66)
+
+    metadata = build_youtube_metadata(video_path, config, project_id=project_id)
+    interval_s = config.get("stage_interval_seconds", 180)
     
-    desc = (
-        f"Vídeo timelapse gravado e renderizado em {res} (4K UHD) a {fps} FPS.\n\n"
-        f"• Projeto: {project_id}\n"
-        f"• Software: Timelapse Studio 4K UHD\n"
-        f"• Processamento: PIL Multiprocessing + FFmpeg Hardware Acceleration\n"
+    confirmed, final_metadata = preview_and_confirm_youtube_metadata(
+        metadata, video_path, interval_seconds=interval_s, non_interactive=non_interactive
     )
     
-    tags = ["timelapse", "4k", "timelapse studio", "uhd", "gopro", "canon", "photography"]
-    
-    metadata = {
-        "title": title,
-        "description": desc,
-        "tags": tags,
-        "privacy_status": privacy,
-        "category_id": category
-    }
-    
+    if not confirmed or not final_metadata:
+        tracker.update_stage_status(project_id, "etapa_5", "skipped", details="Upload cancelado pelo usuário na tela de preview")
+        logger.log_event(project_id, "etapa_5_youtube", "Upload cancelado pelo usuário na tela de preview.")
+        return False, None
+        
     tracker.update_stage_status(project_id, "etapa_5", "in_progress")
-    success, url, vid = youtube_uploader.upload_video_resumable(video_path, metadata=metadata, project_id=project_id)
+    try:
+        success, url, vid = youtube_uploader.upload_video_resumable(video_path, metadata=final_metadata, project_id=project_id)
+    except Exception as e:
+        logger.log_event(project_id, "etapa_5_youtube", f"Exceção durante upload: {e}", level="ERROR")
+        print(f"\n[-] Erro inesperado durante o upload: {e}")
+        success, url, vid = False, None, None
+
     ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
+    privacy = final_metadata.get("privacy_status", "unlisted")
     
     if success and url:
         tracker.update_stage_status(project_id, "etapa_5", "completed", details=f"Publicado no YouTube: {url}", extra_data={"youtube_url": url, "video_id": vid})
@@ -1424,13 +2228,15 @@ def edit_settings(config, config_path=CONFIG_FILE):
         print(f"[11] Intervalo entre Etapas (s)  : {stage_interval}s ({stage_interval/60:.1f} min)")
         print(f"[12] Canal de Notificações NTFY  : {ntfy_topic}")
         print(f"[13] Amostragem Modo Teste       : {config['test_sample_size']} fotos")
+        custom_tags_disp = ", ".join(config.get("youtube_custom_tags", [])) if config.get("youtube_custom_tags") else "Nenhuma tag definida"
+        print(f"[14] Tags Customizadas no YouTube: {custom_tags_disp}")
         print("-" * 66)
         print(f"[S] Salvar Configurações Atuais no '{config_path}'")
         print("[D] Restaurar Configurações Padrão de Fábrica (Reset)")
         print("[0] Voltar ao Menu Principal")
         print("=" * 66)
         
-        choice = input("Escolha uma opção [0-13, S ou D]: ").strip().lower()
+        choice = input("Escolha uma opção [0-14, S ou D]: ").strip().lower()
         if choice == "1":
             select_source_dir(config)
         elif choice == "2":
@@ -1491,6 +2297,15 @@ def edit_settings(config, config_path=CONFIG_FILE):
             val = input(f"Nº de Fotos no Teste [{config['test_sample_size']}]: ").strip()
             if val.isdigit():
                 config["test_sample_size"] = int(val)
+        elif choice == "14":
+            current_tags_str = ", ".join(config.get("youtube_custom_tags", []))
+            print(f"\nTags customizadas atuais: {current_tags_str or 'Nenhuma'}")
+            tags_in = input("Digite as tags personalizadas separadas por vírgula (ou Enter para manter): ").strip()
+            if tags_in:
+                parsed_tags = [t.strip().lower() for t in tags_in.split(",") if t.strip()]
+                config["youtube_custom_tags"] = parsed_tags
+                print(f"[+] Tags personalizadas salvas: {', '.join(parsed_tags)}")
+                time.sleep(1.0)
         elif choice == "s":
             if save_config(config, config_path):
                 print(f"\n[+] Configurações salvas em '{config_path}' com sucesso!")

@@ -13,6 +13,7 @@
   "youtube_auto_upload": true,
   "youtube_privacy_status": "unlisted",
   "youtube_category_id": "22",
+  "youtube_custom_tags": [],
   "stage_interval_seconds": 180,
   "ntfy_topic": "timelapse-studio-2026"
 }

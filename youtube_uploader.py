@@ -122,6 +122,12 @@ def upload_video_resumable(video_path, metadata=None, project_id=None):
         print(f"[-] {msg}")
         logger.log_event(project_id, "etapa_5_youtube", msg, level="ERROR")
         return False, None, None
+
+    if not os.path.isfile(video_path):
+        msg = f"O caminho informado para upload não é um arquivo (é uma pasta ou caminho inválido): {video_path}"
+        print(f"[-] {msg}")
+        logger.log_event(project_id, "etapa_5_youtube", msg, level="ERROR")
+        return False, None, None
         
     youtube = get_authenticated_service(project_id)
     if not youtube:
@@ -164,15 +170,43 @@ def upload_video_resumable(video_path, metadata=None, project_id=None):
         }
     }
     
+    # Inclusão oficial de geolocalização e data de gravação (recordingDetails)
+    location_data = metadata.get("location")
+    recording_date = metadata.get("recording_date")
+    if location_data or recording_date:
+        rec_body = {}
+        if location_data and isinstance(location_data, dict):
+            if "latitude" in location_data and "longitude" in location_data and location_data["latitude"] is not None:
+                loc_dict = {
+                    "latitude": float(location_data["latitude"]),
+                    "longitude": float(location_data["longitude"])
+                }
+                if location_data.get("altitude") is not None:
+                    loc_dict["altitude"] = float(location_data["altitude"])
+                rec_body["location"] = loc_dict
+            if location_data.get("location_description"):
+                rec_body["locationDescription"] = str(location_data["location_description"])[:100]
+        if recording_date:
+            rec_body["recordingDate"] = str(recording_date)
+        if rec_body:
+            body["recordingDetails"] = rec_body
+            if "location" in rec_body:
+                print(f" Localização : {rec_body.get('locationDescription', '')} ({rec_body['location']['latitude']:.4f}, {rec_body['location']['longitude']:.4f})")
+    
     # Chunk size: 8 MB (múltiplo de 256 KB exigido pelo YouTube)
     chunk_size = 8 * 1024 * 1024
-    media = MediaFileUpload(video_path, chunksize=chunk_size, resumable=True)
-    
-    request = youtube.videos().insert(
-        part=",".join(body.keys()),
-        body=body,
-        media_body=media
-    )
+    try:
+        media = MediaFileUpload(video_path, chunksize=chunk_size, resumable=True)
+        request = youtube.videos().insert(
+            part=",".join(body.keys()),
+            body=body,
+            media_body=media
+        )
+    except Exception as e:
+        msg = f"Erro ao preparar arquivo para upload ({os.path.basename(video_path)}): {e}"
+        print(f"[-] {msg}")
+        logger.log_event(project_id, "etapa_5_youtube", msg, level="ERROR")
+        return False, None, None
     
     response = None
     start_time = time.time()
