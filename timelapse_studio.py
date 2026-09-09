@@ -67,6 +67,7 @@ DEFAULT_CONFIG = {
     "youtube_privacy_status": "unlisted",
     "youtube_category_id": "22",
     "youtube_custom_tags": [],
+    "youtube_playlist": "Timelapses",
     "stage_interval_seconds": 180,
     "ntfy_topic": "timelapse-studio-2026"
 }
@@ -100,7 +101,7 @@ def save_config(config, config_path=CONFIG_FILE):
             "crop_mode", "crf", "preset", "target_width", 
             "target_height", "test_sample_size", "output_video", "test_output_video",
             "auto_clean_crops", "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id",
-            "youtube_custom_tags", "stage_interval_seconds", "ntfy_topic"
+            "youtube_custom_tags", "youtube_playlist", "stage_interval_seconds", "ntfy_topic"
         ]
         save_dict = {k: config[k] for k in keys_to_save if k in config}
         with open(config_path, "w", encoding="utf-8") as f:
@@ -297,7 +298,13 @@ def print_banner(config=None, project_id=None):
         clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada"
         yt_auto = config.get("youtube_auto_upload", True)
         yt_privacy = config.get("youtube_privacy_status", "unlisted")
-        yt_status = f"Ativado ({yt_privacy})" if yt_auto else "Desativado"
+        yt_playlist = config.get("youtube_playlist", "Timelapses")
+        if yt_auto:
+            yt_status = f"Ativado ({yt_privacy})"
+            if yt_playlist:
+                yt_status += f" [Playlist: {yt_playlist}]"
+        else:
+            yt_status = "Desativado"
             
         completed_summary = tracker.get_completed_stages_summary(project_id)
         stage_interval = config.get("stage_interval_seconds", 180)
@@ -1655,7 +1662,8 @@ def build_youtube_metadata(video_path, config, project_id=None):
         "privacy_status": privacy,
         "category_id": str(category),
         "location": location_payload,
-        "recording_date": recording_date_iso
+        "recording_date": recording_date_iso,
+        "playlist": config.get("youtube_playlist", "Timelapses")
     }
 
 def display_youtube_metadata_card(metadata, video_path):
@@ -1667,12 +1675,14 @@ def display_youtube_metadata_card(metadata, video_path):
     privacy = metadata.get("privacy_status", "unlisted").upper()
     category = metadata.get("category_id", "22")
     loc_data = metadata.get("location")
+    playlist_name = metadata.get("playlist")
+    pl_disp = f" | Playlist: {playlist_name}" if playlist_name else " | Playlist: Nenhuma"
     
     print("\n" + "=" * 66)
     print("      📺 PRÉ-VISUALIZAÇÃO DE PUBLICAÇÃO NO YOUTUBE (API OFICIAL)")
     print("=" * 66)
     print(f" Arquivo    : {os.path.basename(video_path)} ({file_size_mb:.2f} MB)")
-    print(f" Privacidade: {privacy} | Categoria: {category} (People & Blogs)")
+    print(f" Privacidade: {privacy} | Categoria: {category} (People & Blogs){pl_disp}")
     if loc_data:
         loc_desc = loc_data.get("location_description", "")
         lat = loc_data.get("latitude")
@@ -1778,9 +1788,10 @@ def preview_and_confirm_youtube_metadata(metadata, video_path, interval_seconds=
             print("  [3] Adicionar / Alterar Tags")
             print("  [4] Alterar Privacidade (unlisted / public / private)")
             print("  [5] Editar / Inserir Nome da Localização")
+            print("  [6] Editar Playlist do YouTube")
             print("  [0] Concluir Edições e Retornar ao Preview")
             print("-" * 66)
-            sub_choice = input("Escolha o campo para editar [0-5]: ").strip()
+            sub_choice = input("Escolha o campo para editar [0-6]: ").strip()
             if sub_choice == "1":
                 print(f"\nTítulo atual: {current_meta['title']}")
                 new_title = input("Novo Título (ou Enter para manter): ").strip()
@@ -1825,6 +1836,16 @@ def preview_and_confirm_youtube_metadata(metadata, video_path, interval_seconds=
                         current_meta["location"] = {}
                     current_meta["location"]["location_description"] = new_loc_desc
                     print(f"[+] Localização definida para: {new_loc_desc}")
+            elif sub_choice == "6":
+                cur_pl = current_meta.get("playlist") or ""
+                print(f"\nPlaylist atual: {cur_pl or 'Nenhuma'}")
+                new_pl = input("Novo nome da Playlist (ou 'nenhuma' para desativar) [Enter para manter]: ").strip()
+                if new_pl.lower() in ["nenhuma", "none", "desativar", "0"]:
+                    current_meta["playlist"] = None
+                    print("[+] Adição a playlist desativada para este vídeo.")
+                elif new_pl:
+                    current_meta["playlist"] = new_pl
+                    print(f"[+] Playlist de destino alterada para: {new_pl}")
             
             # Após editar, retorna para o loop do preview com o tempo reiniciado
             continue
@@ -2231,13 +2252,16 @@ def edit_settings(config, config_path=CONFIG_FILE):
         print(f"[13] Amostragem Modo Teste       : {config['test_sample_size']} fotos")
         custom_tags_disp = ", ".join(config.get("youtube_custom_tags", [])) if config.get("youtube_custom_tags") else "Nenhuma tag definida"
         print(f"[14] Tags Customizadas no YouTube: {custom_tags_disp}")
+        yt_playlist = config.get("youtube_playlist", "Timelapses")
+        yt_playlist_disp = yt_playlist if yt_playlist else "Desativada (Não adiciona a playlist)"
+        print(f"[15] Playlist no YouTube         : {yt_playlist_disp}")
         print("-" * 66)
         print(f"[S] Salvar Configurações Atuais no '{config_path}'")
         print("[D] Restaurar Configurações Padrão de Fábrica (Reset)")
         print("[0] Voltar ao Menu Principal")
         print("=" * 66)
         
-        choice = input("Escolha uma opção [0-14, S ou D]: ").strip().lower()
+        choice = input("Escolha uma opção [0-15, S ou D]: ").strip().lower()
         if choice == "1":
             select_source_dir(config)
         elif choice == "2":
@@ -2306,6 +2330,18 @@ def edit_settings(config, config_path=CONFIG_FILE):
                 parsed_tags = [t.strip().lower() for t in tags_in.split(",") if t.strip()]
                 config["youtube_custom_tags"] = parsed_tags
                 print(f"[+] Tags personalizadas salvas: {', '.join(parsed_tags)}")
+                time.sleep(1.0)
+        elif choice == "15":
+            cur_pl = config.get("youtube_playlist", "Timelapses") or ""
+            print(f"\nPlaylist atual: {cur_pl or 'Nenhuma'}")
+            new_pl = input("Nova Playlist do YouTube (ou 'nenhuma' para desativar) [Enter para manter]: ").strip()
+            if new_pl.lower() in ["nenhuma", "none", "desativar", "0"]:
+                config["youtube_playlist"] = None
+                print("[+] Adição automática à playlist desativada.")
+                time.sleep(1.0)
+            elif new_pl:
+                config["youtube_playlist"] = new_pl
+                print(f"[+] Playlist alterada para: {config['youtube_playlist']}")
                 time.sleep(1.0)
         elif choice == "s":
             if save_config(config, config_path):
@@ -2399,6 +2435,19 @@ def parse_arguments():
         help="Desativa o upload automático para o YouTube na execução via linha de comando."
     )
     parser.add_argument(
+        "--playlist",
+        dest="youtube_playlist",
+        type=str,
+        default=None,
+        help="Nome ou ID da playlist no YouTube para adicionar o vídeo automaticamente (padrão: Timelapses)."
+    )
+    parser.add_argument(
+        "--no-playlist",
+        dest="no_playlist",
+        action="store_true",
+        help="Desativa a adição automática do vídeo em playlist do YouTube."
+    )
+    parser.add_argument(
         "--rename-source",
         action="store_true",
         help="Renomeia todas as fotos da pasta de origem com o formato %%Y-%%m-%%d_%%H-%%M-%%S_<nome_original>.jpg e encerra."
@@ -2461,6 +2510,10 @@ def main():
         config["auto_clean_crops"] = True
     if args.ntfy_topic:
         config["ntfy_topic"] = args.ntfy_topic.strip()
+    if args.no_playlist:
+        config["youtube_playlist"] = None
+    elif args.youtube_playlist:
+        config["youtube_playlist"] = args.youtube_playlist.strip()
 
     # Renomeação direta via CLI
     if args.rename_source:

@@ -22,7 +22,10 @@ from google.oauth2.credentials import Credentials
 
 import logger
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube"
+]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SECRETS_DIR = os.path.join(SCRIPT_DIR, "secrets")
 
@@ -55,7 +58,21 @@ def get_authenticated_service(project_id=None):
     # 1. Carrega credenciais salvas previamente
     if os.path.exists(token_path):
         try:
-            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+            needs_new_auth = False
+            try:
+                with open(token_path, "r", encoding="utf-8") as f:
+                    token_data = json.load(f)
+                saved_scopes = set(token_data.get("scopes", []))
+                if not set(SCOPES).issubset(saved_scopes):
+                    print("\n[!] Escopos de permissão atualizados (gerenciamento de playlists). Reautenticação necessária no navegador.")
+                    needs_new_auth = True
+            except Exception:
+                needs_new_auth = False
+
+            if needs_new_auth:
+                creds = None
+            else:
+                creds = Credentials.from_authorized_user_file(token_path, SCOPES)
         except Exception as e:
             logger.log_event(project_id, "etapa_5_youtube", f"Erro ao ler token.json: {e}", level="WARN")
             creds = None
@@ -114,6 +131,105 @@ def get_authenticated_service(project_id=None):
         print(f"[-] {msg}")
         logger.log_event(project_id, "etapa_5_youtube", msg, level="ERROR")
         return None
+
+def add_video_to_playlist(youtube, video_id, playlist_name_or_id, project_id=None, privacy="unlisted"):
+    """
+    Adiciona o vídeo recém-publicado a uma playlist do canal.
+    Localiza a playlist pelo ID (iniciando com 'PL') ou pelo Título (ex: 'Timelapses').
+    Se a playlist não existir no canal pelo título informado, cria-a automaticamente.
+    Retorna (bool_sucesso, playlist_id, playlist_title).
+    """
+    if not youtube or not video_id or not playlist_name_or_id:
+        return False, None, None
+
+    playlist_target = str(playlist_name_or_id).strip()
+    if not playlist_target:
+        return False, None, None
+
+    playlist_id = None
+    playlist_title = playlist_target
+
+    print(f"\n[+] Verificando playlist de destino no YouTube: '{playlist_target}'...")
+
+    try:
+        # Se parecer um ID de playlist (inicia com PL e tem tamanho considerável)
+        if playlist_target.startswith("PL") and len(playlist_target) >= 16:
+            playlist_id = playlist_target
+            playlist_title = playlist_target
+        else:
+            # Buscar playlists do próprio canal
+            next_page = None
+            found = False
+            while True:
+                req = youtube.playlists().list(
+                    part="snippet",
+                    mine=True,
+                    maxResults=50,
+                    pageToken=next_page
+                )
+                resp = req.execute()
+                for item in resp.get("items", []):
+                    item_title = item.get("snippet", {}).get("title", "")
+                    if item_title.strip().lower() == playlist_target.lower():
+                        playlist_id = item["id"]
+                        playlist_title = item_title
+                        found = True
+                        break
+                if found or not resp.get("nextPageToken"):
+                    break
+                next_page = resp.get("nextPageToken")
+
+            # Se não encontrou pelo nome, cria a playlist automaticamente
+            if not playlist_id:
+                print(f"[*] Playlist '{playlist_target}' não encontrada no seu canal. Criando playlist...")
+                create_privacy = privacy.lower() if privacy and privacy.lower() in ["public", "unlisted", "private"] else "unlisted"
+                create_body = {
+                    "snippet": {
+                        "title": playlist_target,
+                        "description": "Timelapses 4K UHD gerados e publicados automaticamente pelo Timelapse Studio."
+                    },
+                    "status": {
+                        "privacyStatus": create_privacy
+                    }
+                }
+                new_pl = youtube.playlists().insert(part="snippet,status", body=create_body).execute()
+                playlist_id = new_pl.get("id")
+                playlist_title = new_pl.get("snippet", {}).get("title", playlist_target)
+                print(f"[+] Playlist criada com sucesso! ID: {playlist_id} ({create_privacy.upper()})")
+                logger.log_event(project_id, "etapa_5_youtube", f"Playlist criada: '{playlist_title}' (ID: {playlist_id})", level="INFO")
+
+        # Insere o vídeo na playlist
+        insert_body = {
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": {
+                    "kind": "youtube#video",
+                    "videoId": video_id
+                }
+            }
+        }
+        youtube.playlistItems().insert(part="snippet", body=insert_body).execute()
+        print(f"[+] 📁 Vídeo adicionado com sucesso à playlist: '{playlist_title}' (ID: {playlist_id})")
+        logger.log_event(
+            project_id, "etapa_5_youtube",
+            f"Vídeo {video_id} adicionado à playlist '{playlist_title}' (ID: {playlist_id})",
+            level="INFO"
+        )
+        return True, playlist_id, playlist_title
+
+    except HttpError as e:
+        err_content = e.content.decode("utf-8", errors="ignore") if hasattr(e, "content") else str(e)
+        if "insufficientPermissions" in err_content or (hasattr(e, "resp") and e.resp.status == 403):
+            print("\n[!] Aviso: Não foi possível adicionar o vídeo à playlist devido a permissões do token atual.")
+            print("    O script atualizará a autorização na próxima execução para permitir gerenciar playlists.")
+        else:
+            print(f"\n[!] Aviso: Erro da API do YouTube ao adicionar à playlist '{playlist_target}': {e}")
+        logger.log_event(project_id, "etapa_5_youtube", f"Falha ao adicionar à playlist '{playlist_target}': {e}", level="WARN")
+        return False, None, None
+    except Exception as e:
+        print(f"\n[!] Aviso: Erro ao adicionar à playlist '{playlist_target}': {e}")
+        logger.log_event(project_id, "etapa_5_youtube", f"Erro inesperado na playlist: {e}", level="WARN")
+        return False, None, None
 
 def upload_video_resumable(video_path, metadata=None, project_id=None):
     """
@@ -275,18 +391,31 @@ def upload_video_resumable(video_path, metadata=None, project_id=None):
         total_time = time.time() - start_time
         total_time_str = time.strftime("%M:%S", time.gmtime(total_time))
         
+        # Adiciona o vídeo à playlist configurada (se houver)
+        target_playlist = metadata.get("playlist") if metadata else None
+        pl_success = False
+        pl_title = None
+        if target_playlist:
+            pl_success, pl_id, pl_title = add_video_to_playlist(
+                youtube, video_id, target_playlist, project_id=project_id, privacy=privacy_status
+            )
+
         print("=" * 66)
         print("         🎉 VÍDEO PUBLICADO COM SUCESSO NO YOUTUBE!")
         print("=" * 66)
         print(f" Link do Vídeo : {video_url}")
         print(f" ID do Vídeo   : {video_id}")
         print(f" Privacidade  : {privacy_status.upper()}")
+        if pl_success and pl_title:
+            print(f" Playlist      : {pl_title}")
         print(f" Tempo de Envio: {total_time_str}")
         print("=" * 66)
         
         success_msg = f"Vídeo publicado com sucesso! ID: {video_id} | URL: {video_url} | Tempo: {total_time_str}"
+        if pl_success and pl_title:
+            success_msg += f" | Playlist: {pl_title}"
         logger.log_event(project_id, "etapa_5_youtube", success_msg, level="INFO")
-        logger.log_event(project_id, "resumo_projeto", f"YouTube: {video_url} ({privacy_status})", level="INFO")
+        logger.log_event(project_id, "resumo_projeto", f"YouTube: {video_url} ({privacy_status})" + (f" [Playlist: {pl_title}]" if pl_success else ""), level="INFO")
         return True, video_url, video_id
     else:
         msg = f"Resposta inesperada do YouTube: {response}"

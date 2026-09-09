@@ -14,6 +14,7 @@
   "youtube_privacy_status": "unlisted",
   "youtube_category_id": "22",
   "youtube_custom_tags": [],
+  "youtube_playlist": "Timelapses",
   "stage_interval_seconds": 180,
   "ntfy_topic": "timelapse-studio-2026"
 }
