@@ -45,7 +45,8 @@ import youtube_uploader
 import tracker
 import notifier
 
-CONFIG_FILE = "config.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
 # Configurações Padrão
 DEFAULT_CONFIG = {
@@ -56,12 +57,12 @@ DEFAULT_CONFIG = {
     "frames_per_image": 1,
     "crf": 15,
     "preset": "ultrafast",
-    "crop_mode": "center",
+    "crop_mode": "bottom",
     "output_dir": "fotos_cortadas_4k",
     "output_video": "timelapse_4k_cortado.mp4",
     "test_sample_size": 120,
     "test_output_video": "timelapse_teste_4k.mp4",
-    "auto_clean_crops": True,
+    "auto_clean_crops": False,
     "youtube_auto_upload": True,
     "youtube_privacy_status": "unlisted",
     "youtube_category_id": "22",
@@ -143,16 +144,16 @@ def interactive_initial_setup_wizard(config_path=CONFIG_FILE):
         
     # 4. Modo de corte (Crop)
     print("4. Modo de Enquadramento 16:9 vertical:")
-    print("   [1] Centro (Corta topo e base igualmente - Padrão)")
-    print("   [2] Topo (Preserva topo, apaga base)")
-    print("   [3] Base (Preserva base, apaga topo)")
-    crop_choice = input(f"   Escolha [1/2/3 ou Enter para Centro]: ").strip()
+    print("   [1] Base / Por Baixo (Preserva base, apaga topo - Padrão)")
+    print("   [2] Centro (Corta topo e base igualmente)")
+    print("   [3] Topo (Preserva topo, apaga base)")
+    crop_choice = input(f"   Escolha [1/2/3 ou Enter para Base]: ").strip()
     if crop_choice == "2":
-        config["crop_mode"] = "top"
-    elif crop_choice == "3":
-        config["crop_mode"] = "bottom"
-    else:
         config["crop_mode"] = "center"
+    elif crop_choice == "3":
+        config["crop_mode"] = "top"
+    else:
+        config["crop_mode"] = "bottom"
         
     # 5. CRF
     crf_input = input(f"5. Fator de Qualidade CRF (Menor = melhor qualidade, padrão: 15) [{config['crf']}]: ").strip()
@@ -281,7 +282,7 @@ def print_banner(config=None, project_id=None):
             except Exception:
                 project_id = "N/A"
                 
-        crop_mode = config.get("crop_mode", "center")
+        crop_mode = config.get("crop_mode", "bottom")
         crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode)
         source_dir = config.get("source_dir", ".")
         source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
@@ -292,7 +293,7 @@ def print_banner(config=None, project_id=None):
         fpi = config.get("frames_per_image", 1)
         dur_per_photo = fpi / fps if fps > 0 else 0
             
-        auto_clean = config.get("auto_clean_crops", True)
+        auto_clean = config.get("auto_clean_crops", False)
         clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada"
         yt_auto = config.get("youtube_auto_upload", True)
         yt_privacy = config.get("youtube_privacy_status", "unlisted")
@@ -904,7 +905,7 @@ def run_step_1_crop(config, max_photos=None):
 
     os.makedirs(output_dir, exist_ok=True)
     
-    crop_mode = config.get("crop_mode", "center")
+    crop_mode = config.get("crop_mode", "bottom")
     crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode)
     
     total = len(all_photos)
@@ -1217,25 +1218,25 @@ def run_step_2_video(config, is_test=False):
 
 def quick_change_crop(config):
     """Menu de atalho rápido para alterar a posição de enquadramento/corte (crop 16:9)."""
-    current_mode = config.get("crop_mode", "center")
+    current_mode = config.get("crop_mode", "bottom")
     print("\n" + "="*66)
     print("             AJUSTE DE ENQUADRAMENTO / CORTE (CROP 16:9)")
     print("="*66)
     print(f"Modo atual: {CROP_MODE_LABELS.get(current_mode, current_mode)}")
     print("\nEscolha a posição do enquadramento vertical:")
-    print("  [1] Centro    (Corta igualmente o topo e a base - Padrão)")
-    print("  [2] Por Baixo (Preserva a base, apaga o topo - Foco no chão/pessoas)")
+    print("  [1] Por Baixo (Preserva a base, apaga o topo - Foco no chão/pessoas - Padrão)")
+    print("  [2] Centro    (Corta igualmente o topo e a base)")
     print("  [3] Por Cima  (Preserva o topo, apaga a base - Foco no céu/paisagem)")
     print("  [0] Cancelar / Manter modo atual")
     print("-" * 66)
     
     choice = input("Escolha uma opção [0-3]: ").strip()
     if choice == "1":
-        config["crop_mode"] = "center"
-        print(f"[+] Modo de corte alterado para: {CROP_MODE_LABELS['center']}")
-    elif choice == "2":
         config["crop_mode"] = "bottom"
         print(f"[+] Modo de corte alterado para: {CROP_MODE_LABELS['bottom']}")
+    elif choice == "2":
+        config["crop_mode"] = "center"
+        print(f"[+] Modo de corte alterado para: {CROP_MODE_LABELS['center']}")
     elif choice == "3":
         config["crop_mode"] = "top"
         print(f"[+] Modo de corte alterado para: {CROP_MODE_LABELS['top']}")
@@ -1332,7 +1333,7 @@ def run_test_mode(config):
     """Executa as Etapas 2 e 3 em modo de teste rápido com amostragem reduzida."""
     source_dir = config.get("source_dir", ".")
     project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
-    crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
+    crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "bottom"), "Por Baixo")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
     dur_photo = fpi / fps if fps > 0 else 0
@@ -2097,11 +2098,11 @@ def run_full_pipeline(config):
     source_dir = config.get("source_dir", ".")
     project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
     
-    crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "center"), "Centro")
+    crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "bottom"), "Por Baixo")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
     dur_photo = fpi / fps if fps > 0 else 0
-    auto_clean = config.get("auto_clean_crops", True)
+    auto_clean = config.get("auto_clean_crops", False)
     yt_auto = config.get("youtube_auto_upload", True)
     yt_priv = config.get("youtube_privacy_status", "unlisted")
     interval_s = config.get("stage_interval_seconds", 180)
@@ -2194,7 +2195,7 @@ def clean_manager(config):
 def edit_settings(config, config_path=CONFIG_FILE):
     """Tela 2: Menu para alteração interativa de parâmetros de configuração e persistência em JSON."""
     while True:
-        crop_label = CROP_MODE_LABELS.get(config.get("crop_mode", "center"), config.get("crop_mode", "center"))
+        crop_label = CROP_MODE_LABELS.get(config.get("crop_mode", "bottom"), config.get("crop_mode", "bottom"))
         source_dir = config.get("source_dir", ".")
         source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
         if source_dir == ".":
@@ -2203,7 +2204,7 @@ def edit_settings(config, config_path=CONFIG_FILE):
         fps = config.get("fps", 60)
         fpi = config.get("frames_per_image", 1)
         dur_photo = fpi / fps if fps > 0 else 0
-        auto_clean = config.get("auto_clean_crops", True)
+        auto_clean = config.get("auto_clean_crops", False)
         clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada (Mantém fotos cortadas)"
         yt_auto = config.get("youtube_auto_upload", True)
         yt_privacy = config.get("youtube_privacy_status", "unlisted")
@@ -2260,7 +2261,7 @@ def edit_settings(config, config_path=CONFIG_FILE):
             if val in ["ultrafast", "medium", "slow"]:
                 config["preset"] = val
         elif choice == "8":
-            config["auto_clean_crops"] = not config.get("auto_clean_crops", True)
+            config["auto_clean_crops"] = not config.get("auto_clean_crops", False)
             print(f"\n[+] Limpeza automática pós-renderização: {'Ativada' if config['auto_clean_crops'] else 'Desativada'}.")
             time.sleep(1.0)
         elif choice == "9":
@@ -2330,7 +2331,7 @@ def parse_arguments():
         "-c", "--config",
         dest="config_file",
         type=str,
-        default=CONFIG_FILE,
+        default=None,
         help=f"Caminho do arquivo de configuração JSON (padrão: {CONFIG_FILE})."
     )
     parser.add_argument(
@@ -2369,6 +2370,25 @@ def parse_arguments():
         help="Fator de qualidade de compressão CRF (menor = melhor qualidade, ex: 15)."
     )
     parser.add_argument(
+        "--clean",
+        dest="clean",
+        action="store_true",
+        help="Ativa a limpeza automática das fotos cortadas (Etapa 4)."
+    )
+    parser.add_argument(
+        "--no-clean",
+        dest="no_clean",
+        action="store_true",
+        help="Desativa a limpeza automática das fotos cortadas (Etapa 4)."
+    )
+    parser.add_argument(
+        "--ntfy", "--ntfy-topic",
+        dest="ntfy_topic",
+        type=str,
+        default=None,
+        help="Canal/tópico de notificações NTFY (ex: timelapse-studio-2026)."
+    )
+    parser.add_argument(
         "--no-wizard",
         action="store_true",
         help="Não exibe o assistente interativo de primeira execução caso o arquivo JSON não exista."
@@ -2405,7 +2425,7 @@ def main():
         pass
 
     args = parse_arguments()
-    config_file = args.config_file
+    config_file = args.config_file or CONFIG_FILE
     
     # Carrega config existente ou executa assistente de primeira execução
     config, exists = load_config(config_file)
@@ -2435,6 +2455,12 @@ def main():
         config["crf"] = args.crf
     if args.no_upload:
         config["youtube_auto_upload"] = False
+    if args.no_clean:
+        config["auto_clean_crops"] = False
+    elif args.clean:
+        config["auto_clean_crops"] = True
+    if args.ntfy_topic:
+        config["ntfy_topic"] = args.ntfy_topic.strip()
 
     # Renomeação direta via CLI
     if args.rename_source:

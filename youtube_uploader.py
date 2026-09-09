@@ -23,12 +23,15 @@ from google.oauth2.credentials import Credentials
 import logger
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-SECRETS_DIR = "secrets"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SECRETS_DIR = os.path.join(SCRIPT_DIR, "secrets")
 
 def find_client_secrets_file():
     """Procura pelo arquivo client_secrets.json na pasta secrets/ ou na raiz."""
     candidates = [
         os.path.join(SECRETS_DIR, "client_secrets.json"),
+        os.path.join(SCRIPT_DIR, "client_secrets.json"),
+        os.path.join("secrets", "client_secrets.json"),
         "client_secrets.json"
     ]
     for c in candidates:

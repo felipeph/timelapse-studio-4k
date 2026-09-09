@@ -12,7 +12,8 @@ import os
 import datetime
 from PIL import Image
 
-LOGS_DIR = "logs"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
 GENERAL_LOG_FILE = "timelapse_studio.log"
 
 def ensure_logs_dir():
