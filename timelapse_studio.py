@@ -17,6 +17,7 @@ Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS, Pasta 
 
 import os
 import sys
+from ui_progress import WorkflowProgress
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -328,36 +329,7 @@ def print_banner(config=None, project_id=None):
         print(f"   • Notificações            : Toast Windows + NTFY ({ntfy_topic})")
         print("=" * 66)
 
-def print_progress_bar(current, total, start_time, prefix="Progresso", current_item=""):
-    """Exibe uma barra de progresso formatada com caracteres ASCII seguros no terminal e item atual."""
-    percent = current / total if total > 0 else 1.0
-    bar_length = 22
-    hashes = '=' * int(round(percent * bar_length))
-    spaces = '-' * (bar_length - len(hashes))
-    
-    elapsed = time.time() - start_time
-    fps = current / elapsed if elapsed > 0 else 0
-    eta = (total - current) / fps if fps > 0 else 0
-    
-    elapsed_str = time.strftime("%M:%S", time.gmtime(elapsed))
-    if elapsed >= 3600:
-        elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
-        
-    eta_str = time.strftime("%M:%S", time.gmtime(eta))
-    if eta >= 3600:
-        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta))
-        
-    item_str = f" | {current_item}" if current_item else ""
-    if len(item_str) > 42:
-        item_str = item_str[:39] + "..."
-        
-    sys.stdout.write(
-        f"\r{prefix}: [{hashes}{spaces}] {percent*100:.1f}% | "
-        f"{current}/{total} | "
-        f"{fps:.1f} it/s | "
-        f"Tempo: {elapsed_str} | ETA: {eta_str}{item_str}   "
-    )
-    sys.stdout.flush()
+
 
 def is_already_formatted_name(filename_or_path):
     """Verifica se o nome do arquivo já segue o padrão YYYY-MM-DD_HH-MM-SS_..."""
@@ -779,6 +751,16 @@ def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_in
     kept_count = len(photos) - len(photos_to_rename)
     errors = 0
     total = len(photos_to_rename)
+    total_bytes = sum(os.path.getsize(p) for p in photos_to_rename)
+    
+    progress_ui = WorkflowProgress(
+        stage_name="ETAPA 1: VALIDAÇÃO E RENOMEAÇÃO",
+        operation_name="Renomeando fotos",
+        total_items=total,
+        total_bytes=total_bytes,
+        is_bytes=False
+    )
+    progress_ui.start()
     start_time = time.time()
     
     # Processamento concorrente para agilizar operações em milhares de fotos
@@ -799,8 +781,9 @@ def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_in
                     logger.log_event(project_id, "etapa_1_rename", f"Erro em {old_name}: {reason}", level="WARN", to_general=False)
                 item_display = f"{old_name} ({reason})"
                 
-            print_progress_bar(idx, total, start_time, prefix="Renomeando fotos", current_item=item_display)
+            progress_ui.update_exact(idx, current_item=item_display)
             
+    progress_ui.stop()
     print() # Pular linha
     total_time = time.time() - start_time
     print("-" * 66)
@@ -938,6 +921,17 @@ def run_step_1_crop(config, max_photos=None):
     ]
 
     start_time = time.time()
+    total_bytes = sum(os.path.getsize(p) for p in all_photos)
+    
+    progress_ui = WorkflowProgress(
+        stage_name="ETAPA 2: PROCESSAMENTO PARALELO (CROP/RESIZE)",
+        operation_name="Processando fotos 4K",
+        total_items=total,
+        total_bytes=total_bytes,
+        is_bytes=False
+    )
+    progress_ui.start()
+    
     completed = 0
     new_count = 0
     reused_count = 0
@@ -961,8 +955,9 @@ def run_step_1_crop(config, max_photos=None):
                 errors += 1
                 item_display = f"Erro: {res}"
                 logger.log_event(project_id, "etapa_2_crop", res, level="WARN", to_general=False)
-            print_progress_bar(completed, total, start_time, prefix="Processando fotos", current_item=item_display)
+            progress_ui.update_exact(completed, current_item=item_display)
 
+    progress_ui.stop()
     print() # Pular linha
     total_time = time.time() - start_time
     print("-" * 66)
@@ -1118,6 +1113,15 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
         output_path
     ]
 
+    total_bytes = sum(os.path.getsize(p) for p in cropped_photos)
+    progress_ui = WorkflowProgress(
+        stage_name="ETAPA 3: RENDERIZAÇÃO DE VÍDEO (FFMPEG)",
+        operation_name="Codificando frames",
+        total_items=total_photos,
+        total_bytes=total_bytes,
+        is_bytes=False
+    )
+    progress_ui.start()
     start_time = time.time()
     try:
         process = subprocess.Popen(
@@ -1135,7 +1139,7 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
             with open(img_path, "rb") as f:
                 img_bytes = f.read()
             process.stdin.write(img_bytes)
-            print_progress_bar(idx + 1, total_photos, start_time, prefix="Renderizando vídeo", current_item=os.path.basename(img_path))
+            progress_ui.update_exact(idx + 1, current_item=os.path.basename(img_path))
     except IOError as e:
         print(f"\n[-] Erro de comunicação com o FFmpeg: {e}")
         return False, encoder_name
@@ -1144,6 +1148,7 @@ def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, fi
             process.stdin.close()
 
     ret_code = process.wait()
+    progress_ui.stop()
     total_time = time.time() - start_time
     print() # Pular linha
     print("-" * 66)
@@ -1397,6 +1402,15 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
     tracker.update_stage_status(project_id, "etapa_4", "in_progress")
     try:
         import shutil
+        total_bytes = sum(os.path.getsize(p) for p in photos if os.path.exists(p))
+        progress_ui = WorkflowProgress(
+            stage_name="ETAPA 4: LIMPEZA",
+            operation_name="Apagando fotos temporárias",
+            total_items=total_files,
+            total_bytes=total_bytes,
+            is_bytes=False
+        )
+        progress_ui.start()
         start_time = time.time()
         for idx, f in enumerate(photos, 1):
             try:
@@ -1404,12 +1418,13 @@ def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
             except Exception:
                 pass
             if idx % 10 == 0 or idx == total_files:
-                print_progress_bar(idx, total_files, start_time, prefix="Apagando fotos", current_item=os.path.basename(f))
+                progress_ui.update_exact(idx, current_item=os.path.basename(f))
         try:
             shutil.rmtree(output_dir, ignore_errors=True)
         except Exception:
             pass
             
+        progress_ui.stop()
         print() # Pular linha
         print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({total_files} arquivos, {size_mb:.2f} MB liberados).")
         print("=" * 66)

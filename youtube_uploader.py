@@ -21,6 +21,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
 import logger
+from ui_progress import WorkflowProgress
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
@@ -332,42 +333,30 @@ def upload_video_resumable(video_path, metadata=None, project_id=None):
     retry_count = 0
     max_retries = 10
     
-    print("Enviando vídeo...")
+    progress_ui = WorkflowProgress(
+        stage_name="ETAPA 5: UPLOAD PARA YOUTUBE",
+        operation_name="Enviando vídeo 4K",
+        total_items=file_size,
+        total_bytes=file_size,
+        is_bytes=True
+    )
+    progress_ui.start()
+    
     while response is None:
         try:
             status, response = request.next_chunk()
             if status:
                 progress = status.progress()
-                percent = progress * 100
-                bar_len = 28
-                hashes = '=' * int(round(progress * bar_len))
-                spaces = '-' * (bar_len - len(hashes))
-                
-                elapsed = time.time() - start_time
                 bytes_sent = status.total_size * progress if status.total_size else 0
-                mb_sent = bytes_sent / (1024 * 1024)
-                total_mb = status.total_size / (1024 * 1024) if status.total_size else file_size_mb
-                
-                speed_mb_s = mb_sent / elapsed if elapsed > 0 else 0
-                eta_s = (total_mb - mb_sent) / speed_mb_s if speed_mb_s > 0 else 0
-                
-                elapsed_str = time.strftime("%M:%S", time.gmtime(elapsed))
-                eta_str = time.strftime("%M:%S", time.gmtime(eta_s))
-                
-                sys.stdout.write(
-                    f"\rUpload YouTube: [{hashes}{spaces}] {percent:.1f}% | "
-                    f"{mb_sent:.1f}/{total_mb:.1f} MB | {speed_mb_s:.2f} MB/s | "
-                    f"Tempo: {elapsed_str} | ETA: {eta_str}"
-                )
-                sys.stdout.flush()
+                progress_ui.update_exact(bytes_sent, current_item=os.path.basename(video_path))
                 retry_count = 0
         except HttpError as e:
             if e.resp.status in [500, 502, 503, 504] and retry_count < max_retries:
                 retry_count += 1
                 sleep_time = min(2 ** retry_count, 60)
-                print(f"\n[!] Erro de rede ({e.resp.status}). Tentativa {retry_count}/{max_retries} em {sleep_time}s...")
                 time.sleep(sleep_time)
             else:
+                progress_ui.stop()
                 msg = f"Erro na API do YouTube ({e.resp.status}): {e.content.decode('utf-8', errors='ignore')}"
                 print(f"\n[-] {msg}")
                 logger.log_event(project_id, "etapa_5_youtube", msg, level="ERROR")
@@ -376,15 +365,15 @@ def upload_video_resumable(video_path, metadata=None, project_id=None):
             if retry_count < max_retries:
                 retry_count += 1
                 sleep_time = min(2 ** retry_count, 60)
-                print(f"\n[!] Conexão oscilou ({e}). Retomando upload ({retry_count}/{max_retries}) em {sleep_time}s...")
                 time.sleep(sleep_time)
             else:
+                progress_ui.stop()
                 msg = f"Falha irrecuperável no upload: {e}"
                 print(f"\n[-] {msg}")
                 logger.log_event(project_id, "etapa_5_youtube", msg, level="ERROR")
                 return False, None, None
 
-    sys.stdout.write("\n")
+    progress_ui.stop()
     if response and "id" in response:
         video_id = response["id"]
         video_url = f"https://youtu.be/{video_id}"
