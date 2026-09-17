@@ -17,7 +17,7 @@ Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS, Pasta 
 
 import os
 import sys
-from ui_progress import WorkflowProgress
+from ui_progress import WorkflowProgress, RenderProgressUI
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn, TextColumn, TimeRemainingColumn
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -732,6 +732,7 @@ def render_video_ffmpeg(manifest_path, output_video_path, config, project_id=Non
     
     crf = config.get("crf", 15)
     fps = config.get("fps", 60)
+    frames_per_image = config.get("frames_per_image", 1)
     preset = config.get("preset", "ultrafast")
     crop_mode = config.get("crop_mode", "bottom")
     
@@ -753,40 +754,110 @@ def render_video_ffmpeg(manifest_path, output_video_path, config, project_id=Non
         "-i", str(manifest_path),
         "-vf", crop_filter,
         "-r", str(fps),
-        "-pix_fmt", "yuv420p"
+        "-pix_fmt", "yuv420p",
+        "-progress", "pipe:1",
+        "-nostats"
     ] + encoder_args + youtube_flags + [str(output_video_path)]
     
     print("\nExecutando FFmpeg com o comando:")
     print(" ".join(cmd))
+    print()
     
-    progress = Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TextColumn("[progress.percentage]{task.percentage:>3.0f}%"), TimeRemainingColumn())
     with open(manifest_path, 'r', encoding='utf-8') as f:
-        total_frames = sum(1 for line in f if line.startswith("file '")) - 1
-        
-    task_id = progress.add_task(f"[green]Renderizando 4K ({encoder_name})...", total=total_frames)
-    progress.start()
+        photo_count = max(0, sum(1 for line in f if line.startswith("file '")) - 1)
+    total_frames = max(1, photo_count * frames_per_image)
     
+    output_name = os.path.basename(str(output_video_path))
+    ui = RenderProgressUI(
+        total_frames=total_frames,
+        encoder_name=encoder_name,
+        resolution="3840x2160 (4K UHD)",
+        fps_target=fps,
+        output_name=output_name
+    )
+    ui.start()
+    
+    stderr_lines = []
+    def capture_stderr(proc):
+        try:
+            for err_line in iter(proc.stderr.readline, ''):
+                if err_line:
+                    stderr_lines.append(err_line)
+        except Exception:
+            pass
+
+    import threading
+    process = None
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True)
-        import re
-        for line in process.stderr:
-            if "frame=" in line:
-                match = re.search(r'frame=\s*(\d+)', line)
-                if match:
-                    current_frame = int(match.group(1))
-                    progress.update(task_id, completed=current_frame)
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            bufsize=1
+        )
+
+        t_err = threading.Thread(target=capture_stderr, args=(process,), daemon=True)
+        t_err.start()
+
+        current_frame = 0
+        current_fps = 0.0
+        current_speed = "0.0x"
+
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("frame="):
+                try:
+                    current_frame = int(line.split("=", 1)[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith("fps="):
+                try:
+                    current_fps = float(line.split("=", 1)[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith("speed="):
+                try:
+                    current_speed = line.split("=", 1)[1].strip()
+                except IndexError:
+                    pass
+            elif line.startswith("progress="):
+                ui.update(frame=current_frame, fps=current_fps, speed=current_speed)
+
         process.wait()
-        progress.stop()
-        
+        t_err.join(timeout=2.0)
+
         if process.returncode == 0:
+            ui.finish(success=True)
             logger.log_event(project_id, "etapa_2", f"Video {output_video_path} gerado com sucesso.", level="INFO")
             notifier.notify_stage_completion(project_id, 2, "Renderizacao Concluida", details=f"O video 4K esta pronto!", ntfy_topic=config.get("ntfy_topic"))
             return True
         else:
-            logger.log_event(project_id, "etapa_2", f"FFmpeg falhou com codigo {process.returncode}", level="ERROR")
+            err_detail = "".join(stderr_lines[-10:]) if stderr_lines else f"Codigo {process.returncode}"
+            ui.finish(success=False, message=f"Codigo {process.returncode}")
+            logger.log_event(project_id, "etapa_2", f"FFmpeg falhou com codigo {process.returncode}: {err_detail}", level="ERROR")
             return False
+
+    except KeyboardInterrupt:
+        ui.cancel()
+        print("\n[!] Renderizacao cancelada pelo usuario.")
+        if process:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        logger.log_event(project_id, "etapa_2", "Renderizacao cancelada pelo usuario via teclado", level="WARN")
+        return False
     except Exception as e:
-        progress.stop()
+        ui.finish(success=False, message=str(e))
         logger.log_event(project_id, "etapa_2", f"Falha ao executar FFmpeg: {e}", level="ERROR")
         return False
 
