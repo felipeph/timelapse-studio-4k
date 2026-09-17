@@ -56,7 +56,7 @@ def extract_exif_datetime(img_path):
         
     return datetime.datetime.now()
 
-def get_project_id(photos_or_source_dir, output_dir_name="fotos_cortadas_4k"):
+def get_project_id(photos_or_source_dir):
     """
     Determina o identificador do projeto no formato YYYY-MM-DD_HH-MM-SS
     com base na data/hora da foto mais antiga encontrada na pasta de origem.
@@ -66,15 +66,8 @@ def get_project_id(photos_or_source_dir, output_dir_name="fotos_cortadas_4k"):
         photo_paths = photos_or_source_dir
     elif isinstance(photos_or_source_dir, str) and os.path.exists(photos_or_source_dir):
         valid_exts = {".jpg", ".jpeg"}
-        output_dir_abs = os.path.abspath(output_dir_name)
-        output_in_base_abs = os.path.abspath(os.path.join(photos_or_source_dir, output_dir_name))
         
         for root, dirs, files in os.walk(photos_or_source_dir):
-            abs_root = os.path.abspath(root)
-            if abs_root == output_dir_abs or abs_root.startswith(output_dir_abs + os.sep):
-                continue
-            if abs_root == output_in_base_abs or abs_root.startswith(output_in_base_abs + os.sep):
-                continue
             if "__pycache__" in root or ".git" in root:
                 continue
             for f in files:

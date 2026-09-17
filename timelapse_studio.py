@@ -18,6 +18,7 @@ Interface de Linha de Comando (CLI) Interativa com Ajuste Rápido de FPS, Pasta 
 import os
 import sys
 from ui_progress import WorkflowProgress
+from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn, TextColumn, TimeRemainingColumn
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -59,11 +60,9 @@ DEFAULT_CONFIG = {
     "crf": 15,
     "preset": "ultrafast",
     "crop_mode": "bottom",
-    "output_dir": "fotos_cortadas_4k",
     "output_video": "timelapse_4k_cortado.mp4",
     "test_sample_size": 120,
     "test_output_video": "timelapse_teste_4k.mp4",
-    "auto_clean_crops": False,
     "youtube_auto_upload": True,
     "youtube_privacy_status": "unlisted",
     "youtube_category_id": "22",
@@ -98,10 +97,10 @@ def save_config(config, config_path=CONFIG_FILE):
     """
     try:
         keys_to_save = [
-            "source_dir", "output_dir", "fps", "frames_per_image", 
+            "source_dir", "fps", "frames_per_image", 
             "crop_mode", "crf", "preset", "target_width", 
             "target_height", "test_sample_size", "output_video", "test_output_video",
-            "auto_clean_crops", "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id",
+            "youtube_auto_upload", "youtube_privacy_status", "youtube_category_id",
             "youtube_custom_tags", "youtube_playlist", "stage_interval_seconds", "ntfy_topic"
         ]
         save_dict = {k: config[k] for k in keys_to_save if k in config}
@@ -260,17 +259,6 @@ def resolve_custom_video_path(custom_path):
         print(f"[-] O caminho '{cleaned}' não é um arquivo regular.")
         return None
 
-def get_output_dir(config):
-    """
-    Retorna o caminho absoluto da pasta de fotos cortadas dentro da pasta de origem.
-    Se output_dir já for um caminho absoluto, mantém; caso contrário, une à pasta de origem.
-    """
-    source_dir = config.get("source_dir", ".")
-    output_dir_name = config.get("output_dir", "fotos_cortadas_4k")
-    if os.path.isabs(output_dir_name):
-        return os.path.abspath(output_dir_name)
-    return os.path.abspath(os.path.join(source_dir, output_dir_name))
-
 def print_banner(config=None, project_id=None):
     """Exibe o cabeçalho decorado do programa e as configurações atuais ativas."""
     print("=" * 66)
@@ -280,7 +268,7 @@ def print_banner(config=None, project_id=None):
     if config:
         if not project_id:
             try:
-                project_id = logger.get_project_id(config.get("source_dir", "."), config.get("output_dir", "fotos_cortadas_4k"))
+                project_id = logger.get_project_id(config.get("source_dir", "."))
             except Exception:
                 project_id = "N/A"
                 
@@ -290,13 +278,9 @@ def print_banner(config=None, project_id=None):
         source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
         if source_dir == ".":
             source_display += " (Diretório Atual)"
-        output_dir_display = get_output_dir(config)
         fps = config.get("fps", 60)
         fpi = config.get("frames_per_image", 1)
         dur_per_photo = fpi / fps if fps > 0 else 0
-            
-        auto_clean = config.get("auto_clean_crops", False)
-        clean_status = "Ativada (Apaga fotos cortadas após renderizar)" if auto_clean else "Desativada"
         yt_auto = config.get("youtube_auto_upload", True)
         yt_privacy = config.get("youtube_privacy_status", "unlisted")
         yt_playlist = config.get("youtube_playlist", "Timelapses")
@@ -315,15 +299,13 @@ def print_banner(config=None, project_id=None):
         print(f" ETAPAS CONCLUÍDAS: {completed_summary}")
         print("-" * 66)
         print(" CONFIGURAÇÕES ATUAIS:")
-        print(f"   • Pasta de Origem (Fotos): {source_display}")
-        print(f"   • Pasta de Cortes (4K)   : {output_dir_display}")
+        print(f"   • Origem e Destino (Vídeo): {source_display}")
         print(f"   • Taxa de Quadros (FPS)  : {fps} fps")
         print(f"   • Frames por Imagem (FPI): {fpi} frame(s)/foto ({dur_per_photo:.2f}s por foto)")
         print(f"   • Modo de Corte (Crop)    : {crop_label}")
         print(f"   • Qualidade (CRF)         : {config['crf']} (Menor = melhor qualidade)")
         print(f"   • Resolução Alvo          : {config['target_width']}x{config['target_height']} (4K UHD)")
         print(f"   • Amostra Modo Teste      : {config['test_sample_size']} fotos")
-        print(f"   • Limpeza Pós-Vídeo       : {clean_status}")
         print(f"   • Upload YouTube          : {yt_status}")
         print(f"   • Intervalo entre Etapas  : {stage_interval}s (Pausa interativa)")
         print(f"   • Notificações            : Toast Windows + NTFY ({ntfy_topic})")
@@ -608,27 +590,21 @@ def format_photo_name(img_path, dt=None):
     name_no_ext, ext = os.path.splitext(base_name)
     return f"{ts_prefix}_{name_no_ext}{ext.lower()}"
 
-def find_all_photos(base_dir, output_dir_name="fotos_cortadas_4k"):
+def find_all_photos(base_dir):
     """
-    Busca todas as fotos JPG/JPEG recursivamente na pasta informada (ex: subpastas DCIM, 138GOPRO, 100CANON, ou raiz),
+    Lista recursivamente todas as fotos na pasta base. DCIM, 138GOPRO, 100CANON, ou raiz),
     ignorando a pasta de saída de cortes e fotos já recortadas.
     """
     image_files = []
     if not base_dir or not os.path.exists(base_dir):
         return []
 
-    output_dir_abs = os.path.abspath(output_dir_name)
-    output_in_base_abs = os.path.abspath(os.path.join(base_dir, output_dir_name))
     valid_exts = {".jpg", ".jpeg"}
     
     # Varredura recursiva por todas as subpastas
     for root, dirs, files in os.walk(base_dir):
-        # Ignorar pasta de saída cortada, caches e pastas ocultas
+        # Ignorar caches e pastas ocultas
         abs_root = os.path.abspath(root)
-        if abs_root == output_dir_abs or abs_root.startswith(output_dir_abs + os.sep):
-            continue
-        if abs_root == output_in_base_abs or abs_root.startswith(output_in_base_abs + os.sep):
-            continue
         if "__pycache__" in root or ".git" in root:
             continue
             
@@ -686,300 +662,155 @@ def select_source_dir(config):
     else:
         print("[-] Opção inválida. Pasta de origem mantida.")
 
-def process_single_rename(img_path):
+def run_step_1_manifest(config, project_id=None, is_test=False):
     """
-    Worker para extrair EXIF e renomear uma foto de origem.
-    Retorna (sucesso: bool, old_name: str, new_name: str, motivo: str).
+    Nova Etapa 1: Lê as datas EXIF das fotos (sem tocar nos originais), ordena cronologicamente
+    e gera um arquivo manifest.txt (ffconcat) para o FFmpeg consumir.
     """
-    dir_name = os.path.dirname(img_path)
-    old_filename = os.path.basename(img_path)
-    try:
-        new_filename = format_photo_name(img_path)
-        if old_filename != new_filename:
-            new_path = os.path.join(dir_name, new_filename)
-            if not os.path.exists(new_path):
-                os.rename(img_path, new_path)
-                return True, old_filename, new_filename, "Renomeado com sucesso"
-            else:
-                return False, old_filename, new_filename, "Destino já existe"
-        return False, old_filename, old_filename, "Já formatado"
-    except Exception as e:
-        return False, old_filename, old_filename, str(e)
-
-def rename_source_photos(source_dir, output_dir_name="fotos_cortadas_4k", non_interactive=False, project_id=None, config=None):
-    """
-    Renomeia todas as fotos JPG/JPEG na pasta de origem com a data/hora do EXIF:
-    %Y-%m-%d_%H-%M-%S_<nome_original>.jpg
-    Exibe barra de progresso em tempo real e nome de cada arquivo.
-    """
-    if not project_id:
-        project_id = logger.get_project_id(source_dir, output_dir_name)
-    photos = find_all_photos(source_dir, output_dir_name)
-    if not photos:
-        print(f"\n[-] Nenhuma foto encontrada em {os.path.abspath(source_dir)} para renomear.")
-        return 0
-        
-    print("\n" + "=" * 66)
-    print("      ETAPA 1: ORGANIZAÇÃO E RENOMEAÇÃO DE FOTOS POR EXIF")
-    print("=" * 66)
-    print(f"[+] Projeto: {project_id}")
-    print(f"[+] Pasta de origem: {os.path.abspath(source_dir)}")
-    print(f"[+] Total de fotos encontradas: {len(photos)}")
-    print("[+] Formato alvo: %Y-%m-%d_%H-%M-%S_<nome_original>.jpg")
-    print("-" * 66)
-    
-    # Verificação rápida se todas as fotos já estão renomeadas (evita retrabalho)
-    photos_to_rename = [p for p in photos if not is_already_formatted_name(p)]
-    if not photos_to_rename:
-        print(f"\n[i] Todas as {len(photos)} fotos já estão no formato padrão por EXIF.")
-        print("[+] Nenhuma renomeação necessária. Pulando Etapa 1 (sem retrabalho).")
-        print("=" * 66)
-        tracker.update_stage_status(project_id, "etapa_1", "completed", details=f"Todas as {len(photos)} fotos já estavam padronizadas")
-        logger.log_event(project_id, "etapa_1_rename", f"Todas as {len(photos)} fotos já estavam renomeadas.")
-        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026") if config else "timelapse-studio-2026"
-        notifier.notify_stage_completion(project_id, 1, "Organização e Renomeação EXIF", details=f"Todas as {len(photos)} fotos já estavam organizadas", ntfy_topic=ntfy_topic)
-        return 0
-
-    if not non_interactive:
-        confirm = input(f"Localizadas {len(photos_to_rename)} fotos para renomear. Prosseguir? (s/N): ").strip().lower()
-        if confirm != 's':
-            print("[+] Operação cancelada pelo usuário.")
-            return 0
-            
-    tracker.update_stage_status(project_id, "etapa_1", "in_progress")
-    renamed_count = 0
-    kept_count = len(photos) - len(photos_to_rename)
-    errors = 0
-    total = len(photos_to_rename)
-    total_bytes = sum(os.path.getsize(p) for p in photos_to_rename)
-    
-    progress_ui = WorkflowProgress(
-        stage_name="ETAPA 1: VALIDAÇÃO E RENOMEAÇÃO",
-        operation_name="Renomeando fotos",
-        total_items=total,
-        total_bytes=total_bytes,
-        is_bytes=False
-    )
-    progress_ui.start()
-    start_time = time.time()
-    
-    # Processamento concorrente para agilizar operações em milhares de fotos
-    max_workers = min(32, (os.cpu_count() or 4) * 4)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_single_rename, p) for p in photos_to_rename]
-        for idx, future in enumerate(concurrent.futures.as_completed(futures), 1):
-            success, old_name, new_name, reason = future.result()
-            if success:
-                renamed_count += 1
-                logger.log_event(project_id, "etapa_1_rename", f"Renomeado: {old_name} -> {new_name}", to_general=False)
-                item_display = f"{old_name} -> {new_name}"
-            else:
-                if reason == "Já formatado":
-                    kept_count += 1
-                else:
-                    errors += 1
-                    logger.log_event(project_id, "etapa_1_rename", f"Erro em {old_name}: {reason}", level="WARN", to_general=False)
-                item_display = f"{old_name} ({reason})"
-                
-            progress_ui.update_exact(idx, current_item=item_display)
-            
-    progress_ui.stop()
-    print() # Pular linha
-    total_time = time.time() - start_time
-    print("-" * 66)
-    print(f"[+] Concluído! {renamed_count} arquivos renomeados, {kept_count} mantidos em {total_time:.1f}s ({total/total_time:.1f} fotos/s).")
-    if errors > 0:
-        print(f"[!] {errors} arquivos apresentaram erros ou conflitos.")
-    print("=" * 66)
-    
-    # Atualiza tracking e dispara notificações
-    tracker.update_stage_status(project_id, "etapa_1", "completed", details=f"{renamed_count} fotos renomeadas, {kept_count} mantidas ({total} fotos totais)")
-    logger.log_event(project_id, "etapa_1_rename", f"Etapa 1 finalizada: {renamed_count} fotos renomeadas, {kept_count} mantidas.")
-    ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026") if config else "timelapse-studio-2026"
-    notifier.notify_stage_completion(project_id, 1, "Organização e Renomeação EXIF", details=f"{renamed_count} fotos renomeadas ({total} fotos totais)", ntfy_topic=ntfy_topic)
-    return renamed_count
-
-def process_single_image(task):
-    """
-    Worker executado em paralelo para cortar 16:9 (centralizado, por baixo ou por cima)
-    e redimensionar/ajustar para a resolução alvo (ex: 3840x2160 4K),
-    preservando os metadados EXIF e o nome base com o sufixo _crop4k.jpg.
-    Retorna (sucesso: bool, out_path_ou_erro: str, is_reused: bool).
-    """
-    img_path, output_dir, target_w, target_h, seq_idx, crop_mode = task
-    try:
-        formatted_name = format_photo_name(img_path)
-        name_no_ext, _ = os.path.splitext(formatted_name)
-        
-        # Nome do arquivo final: %Y-%m-%d_%H-%M-%S_nomeoriginal_crop4k.jpg
-        out_filename = f"{name_no_ext}_crop4k.jpg"
-        out_path = os.path.join(output_dir, out_filename)
-        
-        # Evitar retrabalho: se a foto cortada já existe com tamanho válido (> 1KB), reaproveita sem processar!
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
-            return True, out_path, True
-            
-        with Image.open(img_path) as img:
-            raw_exif = img.info.get("exif")
-            w, h = img.size
-            target_aspect = target_w / target_h
-            img_aspect = w / h
-            
-            # Tolerância para considerar a imagem já na proporção correta (ex: 16:9 da Canon SX50)
-            if abs(img_aspect - target_aspect) < 0.01:
-                crop_w = w
-                crop_h = h
-                left = 0
-                top = 0
-            elif img_aspect > target_aspect:
-                # Imagem mais larga que 16:9 (ex: panorâmica 21:9)
-                crop_w = int(h * target_aspect)
-                crop_h = h
-                left = (w - crop_w) // 2
-                top = 0
-            else:
-                # Imagem mais alta que 16:9 (ex: 4:3 de GoPro / celulares / câmeras 3:2)
-                crop_w = w
-                crop_h = int(w / target_aspect)
-                excess_h = h - crop_h
-                left = 0
-                if crop_mode == "top":
-                    # Alinhado por cima (preserva topo, apaga base)
-                    top = 0
-                elif crop_mode == "bottom":
-                    # Alinhado por baixo (preserva base, apaga topo)
-                    top = excess_h
-                else:
-                    # Centralizado (padrão: corta topo e base igualmente)
-                    top = excess_h // 2
-                
-            right = left + crop_w
-            bottom = top + crop_h
-            
-            cropped = img.crop((left, top, right, bottom))
-            
-            # Redimensionar para a resolução alvo (4K 3840x2160)
-            resized = cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            
-            # Garantir formato RGB
-            if resized.mode != "RGB":
-                resized = resized.convert("RGB")
-                
-            save_kwargs = {"quality": 95}
-            if raw_exif:
-                save_kwargs["exif"] = raw_exif
-                
-            resized.save(out_path, "JPEG", **save_kwargs)
-            
-        return True, out_path, False
-    except Exception as e:
-        return False, f"Erro em {os.path.basename(img_path)}: {str(e)}", False
-
-def run_step_1_crop(config, max_photos=None):
-    """Etapa 1: Cortar e redimensionar fotos em paralelo via PIL preservando metadados EXIF."""
+    logger.log_event(project_id, "etapa_1", "Iniciando Etapa 1: Geracao de Manifesto", level="INFO")
     source_dir = config.get("source_dir", ".")
-    output_dir = get_output_dir(config)
-    all_photos = find_all_photos(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    fps = config.get("fps", 60)
+    frames_per_image = config.get("frames_per_image", 1)
+    duration_per_image = frames_per_image / fps
+
+    photos = find_all_photos(source_dir)
+    if is_test:
+        test_size = config.get("test_sample_size", 120)
+        photos = photos[:test_size]
+        logger.log_event(project_id, "etapa_1", f"Modo Teste ativado. Limitando a {len(photos)} fotos.", level="INFO")
+
+    if not photos:
+        print("[!] Nenhuma foto encontrada.")
+        return False, None, []
+
+    print("\nAnalisando EXIF e ordenando fotos...")
+    from concurrent.futures import ThreadPoolExecutor
     
-    if not all_photos:
-        print(f"\n[-] Erro: Nenhuma foto JPG/JPEG encontrada na pasta de origem: {os.path.abspath(source_dir)}")
-        prompt = input("Deseja informar outra pasta de fotos agora? (s/N): ").strip().lower()
-        if prompt == 's':
-            select_source_dir(config)
-            return run_step_1_crop(config, max_photos=max_photos)
-        return False, []
-
-    if max_photos:
-        all_photos = all_photos[:max_photos]
-        print(f"\n[!] MODO TESTE: Limitando processamento às primeiras {len(all_photos)} fotos.")
-
-    os.makedirs(output_dir, exist_ok=True)
+    photo_data = []
+    progress = Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TextColumn("[progress.percentage]{task.percentage:>3.0f}%"), TimeRemainingColumn())
+    task_id = progress.add_task("[cyan]Lendo EXIF...", total=len(photos))
+    progress.start()
     
-    crop_mode = config.get("crop_mode", "bottom")
-    crop_label = CROP_MODE_LABELS.get(crop_mode, crop_mode)
-    
-    total = len(all_photos)
-    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
-    tracker.update_stage_status(project_id, "etapa_2", "in_progress")
+    def process_exif(photo_path):
+        dt = get_exif_datetime(photo_path)
+        return (photo_path, dt)
 
-    print("\n" + "="*66)
-    print("        ETAPA 2: CORTE 16:9 E REDIMENSIONAMENTO 4K (PIL)")
-    print("="*66)
-    print(f"[+] Projeto: {project_id}")
-    print(f"[+] Pasta de origem: {os.path.abspath(source_dir)}")
-    print(f"[+] Fotos localizadas: {total}")
-    print(f"[+] Modo de corte: {crop_label}")
-    print(f"[+] Resolução de saída: {config['target_width']}x{config['target_height']} (4K UHD)")
-    print(f"[+] Preservação EXIF: Ativada")
-    print(f"[+] Núcleos de CPU (Workers): {os.cpu_count()}")
-    print(f"[+] Pasta de destino: {output_dir}")
-    print("-" * 66)
-
-    tasks = [
-        (img_path, output_dir, config["target_width"], config["target_height"], idx + 1, crop_mode)
-        for idx, img_path in enumerate(all_photos)
-    ]
-
-    start_time = time.time()
-    total_bytes = sum(os.path.getsize(p) for p in all_photos)
-    
-    progress_ui = WorkflowProgress(
-        stage_name="ETAPA 2: PROCESSAMENTO PARALELO (CROP/RESIZE)",
-        operation_name="Processando fotos 4K",
-        total_items=total,
-        total_bytes=total_bytes,
-        is_bytes=False
-    )
-    progress_ui.start()
-    
-    completed = 0
-    new_count = 0
-    reused_count = 0
-    errors = 0
-
-    with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = [executor.submit(process_single_image, t) for t in tasks]
-        for future in concurrent.futures.as_completed(futures):
-            completed += 1
-            success, res, is_reused = future.result()
-            if success:
-                item_name = os.path.basename(res)
-                if is_reused:
-                    reused_count += 1
-                    item_display = f"{item_name} (Reaproveitado)"
-                else:
-                    new_count += 1
-                    item_display = f"{item_name}"
-                    logger.log_event(project_id, "etapa_2_crop", f"Cortado 4K: {item_name}", to_general=False)
-            else:
-                errors += 1
-                item_display = f"Erro: {res}"
-                logger.log_event(project_id, "etapa_2_crop", res, level="WARN", to_general=False)
-            progress_ui.update_exact(completed, current_item=item_display)
-
-    progress_ui.stop()
-    print() # Pular linha
-    total_time = time.time() - start_time
-    print("-" * 66)
-    if errors == 0:
-        if reused_count == total:
-            print(f"[+] Sucesso! Todas as {total} fotos já estavam cortadas em 4K e foram reaproveitadas em {total_time:.1f}s.")
-            details_str = f"Todas as {total} fotos reaproveitadas (já cortadas)"
-        else:
-            print(f"[+] Sucesso! {total} fotos prontas ({new_count} novas processadas, {reused_count} reaproveitadas) em {total_time:.1f}s.")
-            details_str = f"{new_count} fotos cortadas, {reused_count} reaproveitadas em {total_time:.1f}s"
+    with ThreadPoolExecutor() as executor:
+        for result in executor.map(process_exif, photos):
+            photo_data.append(result)
+            progress.update(task_id, advance=1)
             
-        tracker.update_stage_status(project_id, "etapa_2", "completed", details=details_str)
-        logger.log_event(project_id, "etapa_2_crop", f"{total} fotos prontas 4K ({new_count} novas, {reused_count} reaproveitadas) em {total_time:.1f}s.")
-        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
-        notifier.notify_stage_completion(project_id, 2, "Corte e Redimensionamento 4K", details=details_str, ntfy_topic=ntfy_topic)
-    else:
-        print(f"[!] Concluído com {errors} erros de {completed} fotos processadas.")
-        tracker.update_stage_status(project_id, "etapa_2", "failed", details=f"{errors} erros de {completed} fotos processadas")
+    progress.stop()
+    
+    # Ordena com base na data (garante fallback seguro)
+    photo_data.sort(key=lambda x: (x[1] is None, x[1], x[0]))
+    sorted_photos = [x[0] for x in photo_data]
+
+    manifest_path = os.path.join(source_dir, "manifest.txt")
+    print(f"\nGerando {manifest_path}...")
+    try:
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            f.write("ffconcat version 1.0\n")
+            for img in sorted_photos:
+                safe_path = str(img).replace('\\', '/')
+                f.write(f"file '{safe_path}'\n")
+                f.write(f"duration {duration_per_image:.6f}\n")
+            if sorted_photos:
+                safe_path = str(sorted_photos[-1]).replace('\\', '/')
+                f.write(f"file '{safe_path}'\n")
         
-    print(f"[+] Fotos salvas em: {output_dir}")
-    print("=" * 66)
-    return errors == 0, output_dir
+        notifier.notify_stage_completion(project_id, 1, "Manifesto Gerado", details=f"O arquivo manifest.txt foi criado com {len(sorted_photos)} fotos.", ntfy_topic=config.get("ntfy_topic"))
+        logger.log_event(project_id, "etapa_1", f"Manifesto criado em {manifest_path} com {len(sorted_photos)} arquivos.", level="INFO")
+        
+        return True, manifest_path, sorted_photos
+    except Exception as e:
+        logger.log_event(project_id, "etapa_1", f"Erro ao gerar manifesto: {e}", level="ERROR")
+        return False, None, []
+
+def render_video_ffmpeg(manifest_path, output_video_path, config, project_id=None):
+    logger.log_event(project_id, "etapa_2", "Iniciando renderizacao com FFmpeg zero-copy", level="INFO")
+    
+    crf = config.get("crf", 15)
+    fps = config.get("fps", 60)
+    preset = config.get("preset", "ultrafast")
+    crop_mode = config.get("crop_mode", "bottom")
+    
+    encoder_name, encoder_args = detect_ffmpeg_encoder(preset, crf)
+    print(f"\n[+] Encoder de Video detectado: {encoder_name}")
+    
+    youtube_flags = ["-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709", "-movflags", "+faststart", "-an"]
+    
+    if crop_mode == "center":
+        crop_filter = "crop=iw:iw/(16/9):0:(ih-(iw/(16/9)))/2,scale=3840:2160"
+    elif crop_mode == "top":
+        crop_filter = "crop=iw:iw/(16/9):0:0,scale=3840:2160"
+    else: # bottom
+        crop_filter = "crop=iw:iw/(16/9):0:(ih-(iw/(16/9))),scale=3840:2160"
+        
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner",
+        "-f", "concat", "-safe", "0",
+        "-i", str(manifest_path),
+        "-vf", crop_filter,
+        "-r", str(fps),
+        "-pix_fmt", "yuv420p"
+    ] + encoder_args + youtube_flags + [str(output_video_path)]
+    
+    print("\nExecutando FFmpeg com o comando:")
+    print(" ".join(cmd))
+    
+    progress = Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TextColumn("[progress.percentage]{task.percentage:>3.0f}%"), TimeRemainingColumn())
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+        total_frames = sum(1 for line in f if line.startswith("file '")) - 1
+        
+    task_id = progress.add_task(f"[green]Renderizando 4K ({encoder_name})...", total=total_frames)
+    progress.start()
+    
+    try:
+        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True)
+        import re
+        for line in process.stderr:
+            if "frame=" in line:
+                match = re.search(r'frame=\s*(\d+)', line)
+                if match:
+                    current_frame = int(match.group(1))
+                    progress.update(task_id, completed=current_frame)
+        process.wait()
+        progress.stop()
+        
+        if process.returncode == 0:
+            logger.log_event(project_id, "etapa_2", f"Video {output_video_path} gerado com sucesso.", level="INFO")
+            notifier.notify_stage_completion(project_id, 2, "Renderizacao Concluida", details=f"O video 4K esta pronto!", ntfy_topic=config.get("ntfy_topic"))
+            return True
+        else:
+            logger.log_event(project_id, "etapa_2", f"FFmpeg falhou com codigo {process.returncode}", level="ERROR")
+            return False
+    except Exception as e:
+        progress.stop()
+        logger.log_event(project_id, "etapa_2", f"Falha ao executar FFmpeg: {e}", level="ERROR")
+        return False
+
+def run_step_2_video(config, project_id, manifest_path, is_test=False):
+    logger.log_event(project_id, "etapa_2", "Preparando Etapa 2", level="INFO")
+    if not manifest_path or not os.path.exists(manifest_path):
+         print("[!] Manifesto nao encontrado para renderizacao.")
+         return False
+         
+    output_video_name = generate_dynamic_video_name(manifest_path, config, is_test)
+    output_video_path = os.path.abspath(os.path.join(config.get("source_dir", "."), output_video_name))
+    
+    # Atualiza as configuracoes com o nome real gerado
+    if is_test:
+        config["test_output_video"] = output_video_name
+    else:
+        config["output_video"] = output_video_name
+        
+    msg = f"Codificando o video:\n{output_video_name}"
+    notifier.send_windows_toast("Iniciando Renderizacao", msg)
+    notifier.send_ntfy_notification(topic=config.get("ntfy_topic"), title="Iniciando Renderizacao", message=msg)
+    
+    return render_video_ffmpeg(manifest_path, output_video_path, config, project_id)
+
 
 def detect_ffmpeg_encoder(preset, crf, force_cpu=False):
     """Detecta se há suporte a GPU (NVIDIA NVENC, AMD AMF, Intel QSV) ou faz fallback para CPU libx264."""
@@ -1010,223 +841,83 @@ def detect_ffmpeg_encoder(preset, crf, force_cpu=False):
     cpu_args = ["-c:v", "libx264", "-profile:v", "high", "-preset", preset, "-crf", str(crf)]
     return "libx264 (CPU)", cpu_args
 
-def generate_video_info(cropped_photos, is_test=False):
+def generate_dynamic_video_name(manifest_path, config, is_test=False):
     """
-    Calcula o nome dinâmico do vídeo e os metadados de captura com base na primeira e na última foto.
-    Formato: timelapse_YYYY-MM-DD_HH-MM---HH-MM.mp4
+    Gera o nome dinâmico do vídeo de acordo com as fotos do manifesto e as configs.
+    Formato: 2026-08-17_16h55m-18h30m_Canon_PowerShot-SX60-HS_4608x3456_1080p_60fps_1fpi_01m09s_timelapse.mp4
     """
-    if not cropped_photos:
-        default_name = "timelapse_teste_4k.mp4" if is_test else "timelapse_4k_cortado.mp4"
-        return default_name, datetime.datetime.now(), datetime.datetime.now(), ""
-        
-    first_dt = get_exif_datetime(cropped_photos[0])
-    last_dt = get_exif_datetime(cropped_photos[-1])
+    import re
+    
+    photos = []
+    if os.path.exists(manifest_path):
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("file "):
+                    match = re.search(r"file '(.*)'", line)
+                    if match:
+                        photos.append(match.group(1))
+    
+    if not photos:
+        return config.get("test_output_video", "timelapse_teste_4k.mp4") if is_test else config.get("output_video", "timelapse_4k_cortado.mp4")
+
+    first_photo = photos[0]
+    last_photo = photos[-1]
+
+    # 1. Datas e horários
+    first_dt = get_exif_datetime(first_photo) or datetime.datetime.now()
+    last_dt = get_exif_datetime(last_photo) or datetime.datetime.now()
     
     first_date_str = first_dt.strftime('%Y-%m-%d')
     last_date_str = last_dt.strftime('%Y-%m-%d')
-    first_time_str = first_dt.strftime('%H-%M')
-    last_time_str = last_dt.strftime('%H-%M')
+    first_time_str = first_dt.strftime('%Hh%Mm')
+    last_time_str = last_dt.strftime('%Hh%Mm')
     
     if first_date_str == last_date_str:
-        range_str = f"{first_date_str}_{first_time_str}---{last_time_str}"
+        range_str = f"{first_date_str}_{first_time_str}-{last_time_str}"
     else:
-        range_str = f"{first_date_str}_{first_time_str}---{last_date_str}_{last_time_str}"
+        range_str = f"{first_date_str}_{first_time_str}-to-{last_date_str}_{last_time_str}"
         
-    prefix = "timelapse_teste" if is_test else "timelapse"
-    video_filename = f"{prefix}_{range_str}.mp4"
-    
-    return video_filename, first_dt, last_dt, range_str
-
-def render_video_ffmpeg(config, cropped_photos, output_path, force_cpu=False, first_dt=None, last_dt=None, range_str=""):
-    """Executa a renderização do FFmpeg via pipe com cálculo seguro de GOP, B-frames e injeção de metadados."""
-    total_photos = len(cropped_photos)
-    fps = config["fps"]
-    frames_per_image = max(1, config.get("frames_per_image", 1))
-    total_video_frames = total_photos * frames_per_image
-    duration_sec = total_video_frames / fps if fps > 0 else 0
-    sec_per_photo = frames_per_image / fps if fps > 0 else 0
-    
-    if first_dt is None and cropped_photos:
-        first_dt = get_exif_datetime(cropped_photos[0])
-    if last_dt is None and cropped_photos:
-        last_dt = get_exif_datetime(cropped_photos[-1])
+    # 2. Câmera e Dimensões
+    cam_info = get_photo_camera_info(first_photo)
+    camera_model = cam_info.get("camera")
+    if camera_model:
+        camera_model = re.sub(r'[^A-Za-z0-9]+', '-', camera_model).strip('-')
+    else:
+        camera_model = "Camera-Desconhecida"
         
-    # Cálculo seguro da estrutura GOP e B-frames conforme o FPS
-    if fps <= 2:
-        gop_size = max(1, fps)
-        b_frames = 0
+    orig_w = cam_info.get("original_width") or "0"
+    orig_h = cam_info.get("original_height") or "0"
+    dimensions_str = f"{orig_w}x{orig_h}"
+    
+    # 3. Configurações de renderização
+    target_h = config.get("target_height", 2160)
+    res_str = "4K" if target_h >= 2160 else ("1080p" if target_h == 1080 else f"{target_h}p")
+    fps = config.get("fps", 60)
+    fpi = config.get("frames_per_image", 1)
+    
+    # 4. Duração
+    total_frames = len(photos) * fpi
+    total_seconds = total_frames / fps if fps > 0 else 0
+    m, s = divmod(int(total_seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        duration_str = f"{h:02d}h{m:02d}m{s:02d}s"
     else:
-        gop_size = max(1, fps // 2)
-        b_frames = 2 if gop_size >= 4 else 0
-
-    encoder_name, encoder_args = detect_ffmpeg_encoder(config["preset"], config["crf"], force_cpu=force_cpu)
-
-    start_iso = first_dt.strftime('%Y-%m-%dT%H:%M:%S') if first_dt else datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-    start_readable = first_dt.strftime('%Y-%m-%d %H:%M:%S') if first_dt else "Desconhecido"
-    end_readable = last_dt.strftime('%Y-%m-%d %H:%M:%S') if last_dt else "Desconhecido"
-    title_str = f"Timelapse {range_str}" if range_str else "Timelapse 4K UHD"
-
-    metadata_args = [
-        "-metadata", f"creation_time={start_iso}",
-        "-metadata", f"date={start_readable}",
-        "-metadata", f"title={title_str}",
-        "-metadata", f"comment=Início das capturas: {start_readable} | Fim: {end_readable}",
-        "-metadata", "description=Timelapse 4K UHD gerado pelo Timelapse Studio"
-    ]
-
-    input_dir = get_output_dir(config)
-
-    print("\n" + "="*66)
-    print("        ETAPA 2: GERACAO DO VIDEO TIMELAPSE 4K (FFMPEG)")
-    print("="*66)
-    print(f"[+] Pasta de origem das fotos: {input_dir}")
-    print(f"[+] Total de fotos cortadas: {total_photos}")
-    print(f"[+] Início das capturas: {start_readable}")
-    print(f"[+] Término das capturas: {end_readable}")
-    print(f"[+] Encoder selecionado: {encoder_name}")
-    print(f"[+] Configuração: {fps} FPS | {frames_per_image} frame(s)/foto ({sec_per_photo:.2f}s/foto)")
-    print(f"[+] Duração estimada: {duration_sec:.1f}s ({total_video_frames} quadros)")
-    print(f"[+] GOP: {gop_size} | B-Frames: {b_frames} | CRF: {config['crf']}")
-    print(f"[+] Arquivo de saída: {os.path.basename(output_path)}")
-    print(f"[+] Pasta de destino: {os.path.dirname(output_path)}")
-    print("-" * 66)
-    print("[>] Enviando imagens para o FFmpeg via pipe...")
-
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-loglevel", "error",
-        "-y",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "-framerate", f"{fps}/{frames_per_image}",
-        "-i", "-",
-        "-vf", "format=yuv420p",
-        "-r", str(fps),
-        *encoder_args,
-        *metadata_args,
-        "-bf", str(b_frames),
-        "-g", str(gop_size),
-        "-movflags", "+faststart",
-        "-colorspace", "bt709",
-        "-color_trc", "bt709",
-        "-color_primaries", "bt709",
-        output_path
-    ]
-
-    total_bytes = sum(os.path.getsize(p) for p in cropped_photos)
-    progress_ui = WorkflowProgress(
-        stage_name="ETAPA 3: RENDERIZAÇÃO DE VÍDEO (FFMPEG)",
-        operation_name="Codificando frames",
-        total_items=total_photos,
-        total_bytes=total_bytes,
-        is_bytes=False
-    )
-    progress_ui.start()
-    start_time = time.time()
-    try:
-        process = subprocess.Popen(
-            ffmpeg_cmd,
-            stdin=subprocess.PIPE,
-            stdout=None,
-            stderr=None
-        )
-    except FileNotFoundError:
-        print("[-] Erro: O executável do FFmpeg não foi encontrado no PATH do sistema.")
-        return False, encoder_name
-
-    try:
-        for idx, img_path in enumerate(cropped_photos):
-            with open(img_path, "rb") as f:
-                img_bytes = f.read()
-            process.stdin.write(img_bytes)
-            progress_ui.update_exact(idx + 1, current_item=os.path.basename(img_path))
-    except IOError as e:
-        print(f"\n[-] Erro de comunicação com o FFmpeg: {e}")
-        return False, encoder_name
-    finally:
-        if process.stdin:
-            process.stdin.close()
-
-    ret_code = process.wait()
-    progress_ui.stop()
-    total_time = time.time() - start_time
-    print() # Pular linha
-    print("-" * 66)
-    
-    if ret_code == 0 and os.path.exists(output_path):
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"[+] Sucesso! Vídeo timelapse criado com sucesso.")
-        print(f"[+] Tempo de renderização: {total_time:.1f} segundos.")
-        print(f"[+] Tamanho do arquivo: {size_mb:.2f} MB")
-        print(f"[+] Arquivo salvo em: {os.path.abspath(output_path)}")
-        print("=" * 66)
-        return True, encoder_name
-    else:
-        print(f"[-] O encoder {encoder_name} encerrou com erro (Código: {ret_code}).")
-        return False, encoder_name
-
-def run_step_2_video(config, is_test=False):
-    """Etapa 3: Gerar o vídeo timelapse 4K com suporte a fallback automático para CPU e metadados."""
-    input_dir = get_output_dir(config)
-    source_dir = config.get("source_dir", ".")
-    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
-    
-    if not os.path.exists(input_dir):
-        print(f"\n[-] Erro: A pasta '{input_dir}' não foi encontrada.")
-        print("    Por favor, execute a Etapa 2 primeiro para gerar as fotos cortadas.")
-        logger.log_event(project_id, "etapa_3_video", f"Pasta de cortes não encontrada: {input_dir}", level="ERROR")
-        return False, None
-
-    pattern = os.path.join(input_dir, "*.jpg")
-    cropped_photos = sorted(glob.glob(pattern))
-
-    if not cropped_photos:
-        print(f"\n[-] Erro: Nenhuma imagem JPG encontrada na pasta '{input_dir}'.")
-        logger.log_event(project_id, "etapa_3_video", f"Nenhuma imagem encontrada em: {input_dir}", level="ERROR")
-        return False, None
-
-    video_name, first_dt, last_dt, range_str = generate_video_info(cropped_photos, is_test=is_test)
-    output_path = os.path.abspath(os.path.join(source_dir, video_name))
-
-    # Evitar retrabalho: se o vídeo já existe com tamanho válido e já foi concluído
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024:
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        if tracker.is_stage_completed(project_id, "etapa_3"):
-            print("\n" + "=" * 66)
-            print("        ETAPA 3: GERAR VÍDEO TIMELAPSE 4K (FFMPEG)")
-            print("=" * 66)
-            print(f"[i] O vídeo '{video_name}' ({size_mb:.2f} MB) já existe no destino.")
-            print("[+] Reaproveitando vídeo já renderizado (sem retrabalho).")
-            print(f"[+] Arquivo: {output_path}")
-            print("=" * 66)
-            return True, output_path
-
-    tracker.update_stage_status(project_id, "etapa_3", "in_progress")
-    # Primeira tentativa (utiliza GPU se disponível)
-    success, encoder_used = render_video_ffmpeg(
-        config, cropped_photos, output_path, force_cpu=False,
-        first_dt=first_dt, last_dt=last_dt, range_str=range_str
-    )
-    
-    # Se a GPU (ex: Intel QSV) falhar, faz fallback automático transparente para CPU (libx264)
-    if not success and "CPU" not in encoder_used:
-        print("\n[!] TENTANDO RENDERIZAR VIA CPU (libx264) COMO FALLBACK DE SEGURANÇA...")
-        logger.log_event(project_id, "etapa_3_video", f"Tentando fallback para CPU (GPU {encoder_used} falhou).", level="WARN")
-        success, encoder_used = render_video_ffmpeg(
-            config, cropped_photos, output_path, force_cpu=True,
-            first_dt=first_dt, last_dt=last_dt, range_str=range_str
-        )
+        duration_str = f"{m:02d}m{s:02d}s"
         
-    if success:
-        tracker.update_stage_status(project_id, "etapa_3", "completed", details=f"Vídeo: {os.path.basename(output_path)} ({encoder_used})", extra_data={"video_path": output_path})
-        logger.log_event(project_id, "etapa_3_video", f"Vídeo renderizado com sucesso: {output_path} ({encoder_used})")
-        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
-        notifier.notify_stage_completion(project_id, 3, "Renderização de Vídeo 4K", details=f"Arquivo: {os.path.basename(output_path)} ({encoder_used})", ntfy_topic=ntfy_topic)
-        return True, output_path
+    # 4.5. Velocidade (Aceleração)
+    real_world_seconds = (last_dt - first_dt).total_seconds()
+    if total_seconds > 0 and real_world_seconds > 0:
+        speedup = int(round(real_world_seconds / total_seconds))
+        speedup_str = f"{speedup}x"
     else:
-        tracker.update_stage_status(project_id, "etapa_3", "failed", details=f"Falha na renderização de {output_path}")
-        logger.log_event(project_id, "etapa_3_video", f"Falha na renderização de: {output_path}", level="ERROR")
-        return False, None
+        speedup_str = "1x"
+        
+    # 5. Nome final
+    suffix = "timelapse_teste" if is_test else "timelapse"
+    video_filename = f"{range_str}_{camera_model}_{dimensions_str}_{res_str}_{fps}fps_{fpi}fpi_{speedup_str}_{duration_str}_{suffix}.mp4"
+    
+    return video_filename
 
 def quick_change_crop(config):
     """Menu de atalho rápido para alterar a posição de enquadramento/corte (crop 16:9)."""
@@ -1282,7 +973,6 @@ def quick_change_fps(config):
     elif choice == "3":
         config["fps"] = 30
         print(f"[+] FPS alterado para {config['fps']} fps.")
-    elif choice == "4":
         config["fps"] = 60
         print(f"[+] FPS alterado para {config['fps']} fps.")
     elif choice == "5":
@@ -1325,7 +1015,6 @@ def quick_change_fpi(config):
     elif choice == "3":
         config["frames_per_image"] = max(1, fps // 2)
         print(f"[+] Frames por imagem alterado para {config['frames_per_image']} frames ({config['frames_per_image']/fps:.2f}s por foto).")
-    elif choice == "4":
         config["frames_per_image"] = fps
         print(f"[+] Frames por imagem alterado para {config['frames_per_image']} frames (1.00s por foto).")
     elif choice == "5":
@@ -1344,7 +1033,7 @@ def quick_change_fpi(config):
 def run_test_mode(config):
     """Executa as Etapas 2 e 3 em modo de teste rápido com amostragem reduzida."""
     source_dir = config.get("source_dir", ".")
-    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    project_id = logger.get_project_id(source_dir)
     crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "bottom"), "Por Baixo")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
@@ -1361,83 +1050,9 @@ def run_test_mode(config):
         quick_change_crop(config)
         
     logger.log_event(project_id, "resumo_projeto", f"Iniciando Modo Teste ({config['test_sample_size']} fotos)")
-    success, _ = run_step_1_crop(config, max_photos=config["test_sample_size"])
+    success, manifest_path, _ = run_step_1_manifest(config, project_id, is_test=True)
     if success:
-        run_step_2_video(config, is_test=True)
-
-def run_step_4_clean_crops(config, non_interactive=False, project_id=None):
-    """
-    Etapa 4: Remove as fotos cortadas intermediárias (fotos_cortadas_4k)
-    para liberar espaço em disco após a renderização do vídeo.
-    """
-    source_dir = config.get("source_dir", ".")
-    if not project_id:
-        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
-        
-    output_dir = get_output_dir(config)
-    if not os.path.exists(output_dir):
-        if not non_interactive:
-            print("\n[!] A pasta de fotos cortadas já não existe ou já foi limpa.")
-        tracker.update_stage_status(project_id, "etapa_4", "completed", details="Pasta de cortes já inexistente ou limpa")
-        return True
-        
-    photos = glob.glob(os.path.join(output_dir, "*.jpg"))
-    total_files = len(photos)
-    size_mb = sum(os.path.getsize(f) for f in photos) / (1024 * 1024) if photos else 0
-    
-    print("\n" + "=" * 66)
-    print("      ETAPA 4: LIMPEZA DE FOTOS CORTADAS INTERMEDIÁRIAS")
-    print("=" * 66)
-    print(f"[+] Projeto: {project_id}")
-    print(f"[+] Pasta de fotos cortadas: {output_dir}")
-    print(f"[+] Total de arquivos temporários: {total_files} ({size_mb:.2f} MB)")
-    print("-" * 66)
-    
-    if not non_interactive:
-        confirm = input(f"Tem certeza que deseja apagar a pasta '{output_dir}'? (s/N): ").strip().lower()
-        if confirm != 's':
-            print("[+] Limpeza cancelada pelo usuário. Arquivos mantidos.")
-            return False
-            
-    tracker.update_stage_status(project_id, "etapa_4", "in_progress")
-    try:
-        import shutil
-        total_bytes = sum(os.path.getsize(p) for p in photos if os.path.exists(p))
-        progress_ui = WorkflowProgress(
-            stage_name="ETAPA 4: LIMPEZA",
-            operation_name="Apagando fotos temporárias",
-            total_items=total_files,
-            total_bytes=total_bytes,
-            is_bytes=False
-        )
-        progress_ui.start()
-        start_time = time.time()
-        for idx, f in enumerate(photos, 1):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
-            if idx % 10 == 0 or idx == total_files:
-                progress_ui.update_exact(idx, current_item=os.path.basename(f))
-        try:
-            shutil.rmtree(output_dir, ignore_errors=True)
-        except Exception:
-            pass
-            
-        progress_ui.stop()
-        print() # Pular linha
-        print(f"[+] Sucesso! Pasta temporária '{output_dir}' apagada ({total_files} arquivos, {size_mb:.2f} MB liberados).")
-        print("=" * 66)
-        tracker.update_stage_status(project_id, "etapa_4", "completed", details=f"{total_files} arquivos temporários apagados ({size_mb:.2f} MB liberados)")
-        logger.log_event(project_id, "etapa_4_clean", f"Pasta '{output_dir}' apagada com sucesso ({total_files} arquivos, {size_mb:.2f} MB liberados).")
-        ntfy_topic = config.get("ntfy_topic", "timelapse-studio-2026")
-        notifier.notify_stage_completion(project_id, 4, "Limpeza de Fotos Intermediárias", details=f"{total_files} fotos apagadas ({size_mb:.2f} MB liberados)", ntfy_topic=ntfy_topic)
-        return True
-    except Exception as e:
-        print(f"[-] Erro ao remover a pasta '{output_dir}': {e}")
-        tracker.update_stage_status(project_id, "etapa_4", "failed", details=f"Erro ao remover: {e}")
-        logger.log_event(project_id, "etapa_4_clean", f"Erro ao remover '{output_dir}': {e}", level="ERROR")
-        return False
+        run_step_2_video(config, project_id, manifest_path, is_test=True)
 
 def build_youtube_metadata(video_path, config, project_id=None):
     """
@@ -1446,7 +1061,7 @@ def build_youtube_metadata(video_path, config, project_id=None):
     """
     source_dir = config.get("source_dir", ".")
     if not project_id:
-        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+        project_id = logger.get_project_id(source_dir)
         
     fps = config.get("fps", 60)
     fpi = max(1, config.get("frames_per_image", 1))
@@ -1953,7 +1568,7 @@ def run_step_5_youtube_upload(config, video_path=None, project_id=None, non_inte
     """
     source_dir = config.get("source_dir", ".")
     if not project_id:
-        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+        project_id = logger.get_project_id(source_dir)
 
     while not video_path:
         video_files = sorted(glob.glob(os.path.join(source_dir, "*.mp4")))
@@ -2124,94 +1739,71 @@ def wait_stage_interval(seconds=180, next_stage_name="Próxima Etapa", current_s
 
 def run_full_pipeline(config):
     """
-    Executa o fluxo completo de 5 etapas:
-    Etapa 1: Organizar/Renomear fotos de origem por EXIF
-    Etapa 2: Cortar e redimensionar fotos para 4K UHD 16:9
-    Etapa 3: Gerar vídeo timelapse 4K
-    Etapa 4: Limpar fotos cortadas intermediárias (se auto_clean_crops estiver ativo)
-    Etapa 5: Publicar vídeo no YouTube (se youtube_auto_upload estiver ativo)
+    Executa o fluxo completo de 3 etapas:
+    Etapa 1: Gerar Manifesto de Vídeo 4K
+    Etapa 2: Gerar Vídeo Timelapse 4K (FFmpeg Zero-Copy)
+    Etapa 3: Publicar vídeo no YouTube (se youtube_auto_upload estiver ativo)
     """
     source_dir = config.get("source_dir", ".")
-    project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    project_id = logger.get_project_id(source_dir)
     
     crop_short = {"center": "Centro", "bottom": "Por Baixo", "top": "Por Cima"}.get(config.get("crop_mode", "bottom"), "Por Baixo")
     fps = config.get("fps", 60)
     fpi = config.get("frames_per_image", 1)
     dur_photo = fpi / fps if fps > 0 else 0
-    auto_clean = config.get("auto_clean_crops", False)
     yt_auto = config.get("youtube_auto_upload", True)
     yt_priv = config.get("youtube_privacy_status", "unlisted")
     interval_s = config.get("stage_interval_seconds", 180)
     
     print("\n" + "=" * 66)
-    print("      INICIANDO FLUXO COMPLETO (ETAPAS 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
+    print("      INICIANDO FLUXO COMPLETO (ETAPAS 1 ➔ 2 ➔ 3)")
     print("=" * 66)
     print(f"    Projeto     : {project_id}")
-    print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config['target_width']}x{config['target_height']} | CRF {config['crf']} | Corte: {crop_short}")
-    print(f"    Limpeza pós-vídeo : {'Ativada' if auto_clean else 'Desativada'}")
+    print(f"    Configuração: {fps} FPS | {fpi} frame(s)/foto ({dur_photo:.2f}s/foto) | {config.get('target_width', 3840)}x{config.get('target_height', 2160)} | CRF {config.get('crf', 15)} | Corte: {crop_short}")
     print(f"    Upload YouTube    : {'Ativado (' + yt_priv + ')' if yt_auto else 'Desativado'}")
     print(f"    Pausa entre etapas: {interval_s}s (3 min)")
     print("-" * 66)
     
-    logger.log_event(project_id, "resumo_projeto", f"Iniciando Fluxo Completo | FPS: {fps} | FPI: {fpi} | CRF: {config['crf']}")
+    logger.log_event(project_id, "resumo_projeto", f"Iniciando Fluxo Completo | FPS: {fps} | FPI: {fpi} | CRF: {config.get('crf', 15)}")
     
-    # Etapa 1: Renomear fotos de origem por EXIF
-    print("\n>>> [1/5] ETAPA 1: Organizando e Renomeando Fotos de Origem por EXIF...")
-    renamed = rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True, project_id=project_id, config=config)
-    
+    # Etapa 1: Gerar Manifesto
+    print("\n>>> [1/3] ETAPA 1: Gerando Manifesto de Vídeo 4K...")
+    crop_ok, manifest_path, _ = run_step_1_manifest(config, project_id)
+    if not crop_ok:
+        msg = "Interrompendo pipeline: falha na Etapa 1 (Manifesto)."
+        print(f"\n[-] {msg}")
+        logger.log_event(project_id, "resumo_projeto", msg, level="ERROR")
+        return
+        
     # Intervalo de segurança após Etapa 1
-    if not wait_stage_interval(interval_s, "Etapa 2 (Corte e Redimensionamento 4K)", "Etapa 1 (Renomeação EXIF)"):
+    if not wait_stage_interval(interval_s, "Etapa 2 (Renderização de Vídeo 4K)", "Etapa 1 (Manifesto)"):
         print("\n[!] Fluxo cancelado após a Etapa 1. Status salvo.")
         return
         
-    # Etapa 2: Cortar e Redimensionar Fotos para 4K
-    print("\n>>> [2/5] ETAPA 2: Cortando e Redimensionando Fotos para 4K UHD...")
-    crop_ok, _ = run_step_1_crop(config)
-    if not crop_ok:
-        msg = "Interrompendo pipeline: falha na Etapa 2 (Corte)."
-        print(f"\n[-] {msg}")
-        logger.log_event(project_id, "resumo_projeto", msg, level="ERROR")
-        return
-        
-    # Intervalo de segurança após Etapa 2
-    if not wait_stage_interval(interval_s, "Etapa 3 (Renderização de Vídeo 4K)", "Etapa 2 (Corte 4K)"):
-        print("\n[!] Fluxo cancelado após a Etapa 2. Status salvo.")
-        return
-        
-    # Etapa 3: Renderizar Vídeo Timelapse 4K
-    print("\n>>> [3/5] ETAPA 3: Renderizando Vídeo Timelapse 4K...")
-    video_ok, video_path = run_step_2_video(config, is_test=False)
+    # Etapa 2: Renderizar Vídeo Timelapse 4K
+    print("\n>>> [2/3] ETAPA 2: Renderizando Vídeo Timelapse 4K...")
+    video_ok, video_path = run_step_2_video(config, project_id, manifest_path, is_test=False)
     if not video_ok or not video_path:
-        msg = "Interrompendo pipeline: falha na Etapa 3 (Renderização de Vídeo)."
+        msg = "Interrompendo pipeline: falha na Etapa 2 (Renderização de Vídeo)."
         print(f"\n[-] {msg}")
         logger.log_event(project_id, "resumo_projeto", msg, level="ERROR")
         return
         
-    # Etapa 4: Limpeza das fotos cortadas intermediárias
-    if auto_clean:
-        if not wait_stage_interval(interval_s, "Etapa 4 (Limpeza de Fotos Temporárias)", "Etapa 3 (Renderização de Vídeo)"):
-            print("\n[!] Fluxo cancelado após a Etapa 3. Vídeo gerado foi mantido.")
-            return
-        print("\n>>> [4/5] ETAPA 4: Limpando Fotos Cortadas Intermediárias...")
-        run_step_4_clean_crops(config, non_interactive=True, project_id=project_id)
-    else:
-        print("\n[i] Etapa 4 ignorada (auto_clean_crops desativado nas configurações).")
-        
-    # Etapa 5: Publicação no YouTube
+    # Etapa 3: Publicação no YouTube
     yt_url = None
     if yt_auto:
-        next_etapa_label = "Etapa 5 (Publicação no YouTube)"
-        prev_etapa_label = "Etapa 4 (Limpeza)" if auto_clean else "Etapa 3 (Renderização de Vídeo)"
+        next_etapa_label = "Etapa 3 (Publicação no YouTube)"
+        prev_etapa_label = "Etapa 2 (Renderização de Vídeo)"
         if not wait_stage_interval(interval_s, next_etapa_label, prev_etapa_label):
             print("\n[!] Fluxo cancelado antes do upload. O vídeo local foi mantido.")
             return
             
-        print("\n>>> [5/5] ETAPA 5: Publicando Vídeo no YouTube...")
+        print("\n>>> [3/3] ETAPA 3: Publicando Vídeo no YouTube...")
         yt_ok, yt_url = run_step_5_youtube_upload(config, video_path=video_path, project_id=project_id)
         if not yt_ok:
             print("\n[!] Aviso: Não foi possível concluir o upload no YouTube, mas o vídeo local foi gerado com sucesso.")
     else:
-        print("\n[i] Etapa 5 ignorada (youtube_auto_upload desativado nas configurações).")
+        print("\n[i] Etapa 3 ignorada (youtube_auto_upload desativado nas configurações).")
         
     print("\n" + "=" * 66)
     print("       🎉 FLUXO COMPLETO FINALIZADO COM SUCESSO!")
@@ -2226,7 +1818,7 @@ def run_full_pipeline(config):
 
 def clean_manager(config):
     """Atalho utilitário para limpeza."""
-    return run_step_4_clean_crops(config, non_interactive=False)
+    return
 
 def edit_settings(config, config_path=CONFIG_FILE):
     """Tela 2: Menu para alteração interativa de parâmetros de configuração e persistência em JSON."""
@@ -2283,7 +1875,6 @@ def edit_settings(config, config_path=CONFIG_FILE):
             quick_change_fps(config)
         elif choice == "3":
             quick_change_fpi(config)
-        elif choice == "4":
             quick_change_crop(config)
         elif choice == "5":
             val = input(f"Novo CRF [{config['crf']}]: ").strip()
@@ -2520,9 +2111,9 @@ def main():
     if args.no_upload:
         config["youtube_auto_upload"] = False
     if args.no_clean:
-        config["auto_clean_crops"] = False
+        pass # obsolete
     elif args.clean:
-        config["auto_clean_crops"] = True
+        pass # obsolete
     if args.ntfy_topic:
         config["ntfy_topic"] = args.ntfy_topic.strip()
     if args.no_playlist:
@@ -2530,10 +2121,8 @@ def main():
     elif args.youtube_playlist:
         config["youtube_playlist"] = args.youtube_playlist.strip()
 
-    # Renomeação direta via CLI
-    if args.rename_source:
-        rename_source_photos(config["source_dir"], config["output_dir"], non_interactive=True, config=config)
-        return
+    project_id = logger.get_project_id(config.get("source_dir", "."))
+
 
     # Execuções automáticas diretas via CLI
     if args.run_all:
@@ -2543,60 +2132,55 @@ def main():
         
     if args.test:
         print_banner(config)
-        success, _ = run_step_1_crop(config, max_photos=config["test_sample_size"])
+        success, manifest_path, _ = run_step_1_manifest(config, project_id, is_test=True)
         if success:
-            run_step_2_video(config, is_test=True)
+            run_step_2_video(config, project_id, manifest_path, is_test=True)
         return
 
     # Modo interativo CLI (Tela 1: Menu Principal)
     while True:
         source_dir = config.get("source_dir", ".")
-        project_id = logger.get_project_id(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
         print_banner(config, project_id=project_id)
         print("MENU PRINCIPAL:")
-        print("  [ENTER] 🚀 EXECUTAR FLUXO COMPLETO (Padrão: Etapas 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
+        print("  [ENTER] 🚀 EXECUTAR FLUXO COMPLETO (Padrão: Etapas 1 ➔ 2 ➔ 3)")
         print("  " + "-" * 58)
-        print("  [1] Etapa 1: Organizar e Renomear Fotos de Origem por EXIF")
-        print("  [2] Etapa 2: Cortar e Redimensionar Fotos para 4K UHD 16:9 (PIL)")
-        print("  [3] Etapa 3: Gerar Vídeo Timelapse 4K (FFmpeg GPU/CPU)")
-        print("  [4] Etapa 4: Limpar / Apagar Fotos Cortadas Intermediárias")
-        print("  [5] Etapa 5: Publicar Vídeo no YouTube (YouTube Data API v3)")
-        print("  [6] Executar Fluxo Completo (Etapas 1 ➔ 2 ➔ 3 ➔ 4 ➔ 5)")
-        print("  [7] ⚙️  Menu de Configurações (Pasta, FPS, Corte, CRF, YouTube, etc.)")
-        print("  [8] Modo Teste Rápido (Amostra reduzida de 120 fotos)")
+        print("  [1] Etapa 1: Gerar Manifesto de Vídeo 4K")
+        print("  [2] Etapa 2: Gerar Vídeo Timelapse 4K (FFmpeg Zero-Copy)")
+        print("  [3] Etapa 3: Publicar Vídeo no YouTube")
+        print("  [4] Executar Fluxo Completo (Etapas 1 ➔ 2 ➔ 3)")
+        print("  [5] ⚙️  Menu de Configurações (Pasta, FPS, Corte, CRF, YouTube, etc.)")
+        print("  [6] Modo Teste Rápido (Amostra reduzida de 120 fotos)")
         print("  [0] Sair")
         print("=" * 66)
         
-        choice = input("Selecione uma opção [0-8 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
+        choice = input("Selecione uma opção [0-6 ou pressione ENTER para Fluxo Completo]: ").strip().lower()
         
-        if choice in ["", "6"]:
+        if choice in ["", "4"]:
             run_full_pipeline(config)
             input("\nPressione Enter para continuar...")
         elif choice == "1":
-            rename_source_photos(config["source_dir"], config["output_dir"], project_id=project_id, config=config)
+            _, manifest_path, _ = run_step_1_manifest(config, project_id)
             input("\nPressione Enter para continuar...")
         elif choice == "2":
-            run_step_1_crop(config)
+            manifest_path = os.path.join(source_dir, "manifest.txt")
+            if not os.path.exists(manifest_path):
+                print("\n[-] manifest.txt não encontrado. Execute a Etapa 1 primeiro.")
+            else:
+                run_step_2_video(config, project_id, manifest_path)
             input("\nPressione Enter para continuar...")
         elif choice == "3":
-            run_step_2_video(config)
-            input("\nPressione Enter para continuar...")
-        elif choice == "4":
-            run_step_4_clean_crops(config, non_interactive=False, project_id=project_id)
-            input("\nPressione Enter para continuar...")
-        elif choice == "5":
             run_step_5_youtube_upload(config, project_id=project_id)
             input("\nPressione Enter para continuar...")
-        elif choice == "7":
+        elif choice == "5":
             edit_settings(config, config_file)
-        elif choice == "8":
+        elif choice == "6":
             run_test_mode(config)
             input("\nPressione Enter para continuar...")
         elif choice == "0":
             print("\n[+] Saindo do Timelapse Studio. Até logo!")
             sys.exit(0)
         else:
-            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-8].")
+            print("\n[-] Opção inválida. Pressione ENTER para fluxo completo ou digite uma opção [0-6].")
             time.sleep(1)
 
 if __name__ == "__main__":
