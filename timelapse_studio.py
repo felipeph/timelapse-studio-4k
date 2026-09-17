@@ -865,7 +865,7 @@ def run_step_2_video(config, project_id, manifest_path, is_test=False):
     logger.log_event(project_id, "etapa_2", "Preparando Etapa 2", level="INFO")
     if not manifest_path or not os.path.exists(manifest_path):
          print("[!] Manifesto nao encontrado para renderizacao.")
-         return False
+         return False, None
          
     output_video_name = generate_dynamic_video_name(manifest_path, config, is_test)
     output_video_path = os.path.abspath(os.path.join(config.get("source_dir", "."), output_video_name))
@@ -880,7 +880,8 @@ def run_step_2_video(config, project_id, manifest_path, is_test=False):
     notifier.send_windows_toast("Iniciando Renderizacao", msg)
     notifier.send_ntfy_notification(topic=config.get("ntfy_topic"), title="Iniciando Renderizacao", message=msg)
     
-    return render_video_ffmpeg(manifest_path, output_video_path, config, project_id)
+    success = render_video_ffmpeg(manifest_path, output_video_path, config, project_id)
+    return success, output_video_path if success else None
 
 
 def detect_ffmpeg_encoder(preset, crf, force_cpu=False):
@@ -1686,7 +1687,7 @@ def run_step_5_youtube_upload(config, video_path=None, project_id=None, non_inte
     # Se a pasta de origem não continha fotos, derivar o project_id com base na pasta do vídeo
     video_dir = os.path.dirname(os.path.abspath(video_path))
     if os.path.isdir(video_dir):
-        if not find_all_photos(source_dir, config.get("output_dir", "fotos_cortadas_4k")):
+        if not find_all_photos(source_dir):
             derived_pid = logger.get_project_id(video_dir, config.get("output_dir", "fotos_cortadas_4k"))
             if derived_pid:
                 project_id = derived_pid
