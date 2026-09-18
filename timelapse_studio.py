@@ -1147,13 +1147,13 @@ def build_youtube_metadata(video_path, config, project_id=None):
     category = config.get("youtube_category_id", "22")
     
     # 1. Obter fotos da pasta de origem para extrair dados ricos
-    photos = find_all_photos(source_dir, config.get("output_dir", "fotos_cortadas_4k"))
+    photos = find_all_photos(source_dir)
     
     # Se a pasta de origem configurada não tem fotos, mas temos o vídeo, buscar fotos na pasta do próprio vídeo
     if not photos and video_path and os.path.exists(video_path):
         video_dir = os.path.dirname(os.path.abspath(video_path))
         if os.path.isdir(video_dir):
-            candidate_photos = find_all_photos(video_dir, config.get("output_dir", "fotos_cortadas_4k"))
+            candidate_photos = find_all_photos(video_dir)
             if candidate_photos:
                 photos = candidate_photos
 
