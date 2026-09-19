@@ -636,7 +636,7 @@ def select_source_dir(config):
     choice = input("Escolha uma opção [0-2]: ").strip()
     if choice == "1":
         config["source_dir"] = "."
-        photos = find_all_photos(config["source_dir"], config["output_dir"])
+        photos = find_all_photos(config["source_dir"])
         print(f"[+] Pasta de origem redefinida para o diretório atual.")
         print(f"[+] Fotos JPG/JPEG encontradas: {len(photos)}")
     elif choice == "2":
@@ -654,7 +654,7 @@ def select_source_dir(config):
             return
             
         config["source_dir"] = cleaned_path
-        photos = find_all_photos(config["source_dir"], config["output_dir"])
+        photos = find_all_photos(config["source_dir"])
         print(f"[+] Pasta de origem alterada com sucesso para: {os.path.abspath(cleaned_path)}")
         print(f"[+] Total de fotos JPG/JPEG encontradas: {len(photos)}")
     elif choice == "0":
@@ -1900,7 +1900,7 @@ def edit_settings(config, config_path=CONFIG_FILE):
         source_display = os.path.abspath(source_dir) if source_dir else os.getcwd()
         if source_dir == ".":
             source_display += " (Diretório Atual)"
-        output_dir_display = get_output_dir(config)
+        output_dir_display = os.path.abspath(config.get("output_dir", source_dir))
         fps = config.get("fps", 60)
         fpi = config.get("frames_per_image", 1)
         dur_photo = fpi / fps if fps > 0 else 0
